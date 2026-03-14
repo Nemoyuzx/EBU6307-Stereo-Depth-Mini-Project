@@ -66,6 +66,12 @@ Run the minimal O1 baseline with:
 python -m ebu6307_stereo --config configs/dataset_paths.example.yaml --profile local --dry-run
 ```
 
+Validate previously written O1 synthetic outputs without changing anything:
+
+```bash
+python -m ebu6307_stereo --config configs/dataset_paths.example.yaml --profile local --validate-results
+```
+
 When run without `--dry-run`, O1 writes one scene-like folder per processed sample under `results/O1b_synthetic_data/`:
 
 ```text

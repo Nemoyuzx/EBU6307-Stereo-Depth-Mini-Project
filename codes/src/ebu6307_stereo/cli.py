@@ -46,6 +46,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Report config and discovered scenes without writing outputs.",
     )
+    parser.add_argument(
+        "--validate-results",
+        action="store_true",
+        help="Validate the configured O1 synthetic output directory without modifying any files.",
+    )
     return parser.parse_args()
 
 
@@ -210,6 +215,55 @@ def write_scene_metadata(scene_output_dir: Path, scene_name: str, shift_pixels: 
     )
 
 
+def validate_o1_results(synthetic_dir: Path) -> int:
+    required_files = ("im0.png", "im1.png", "disp0.pfm")
+    optional_files = ("calib.txt",)
+
+    print(f"Validating synthetic results directory: {synthetic_dir}")
+    if not synthetic_dir.exists():
+        print(f"Synthetic results directory not found: {synthetic_dir}", file=sys.stderr)
+        return 1
+
+    legacy_files = sorted(path for path in synthetic_dir.iterdir() if path.is_file())
+    scene_dirs = sorted(path for path in synthetic_dir.iterdir() if path.is_dir())
+
+    if legacy_files:
+        print("Unexpected flat files found directly under the synthetic results root:")
+        for path in legacy_files:
+            print(f"  - {path.name}")
+    else:
+        print("Unexpected flat files found directly under the synthetic results root: none")
+
+    if not scene_dirs:
+        print("Scene folders found: none")
+    else:
+        print(f"Scene folders found: {len(scene_dirs)}")
+
+    missing_any = False
+    for scene_dir in scene_dirs:
+        missing = [name for name in required_files if not (scene_dir / name).exists()]
+        optional_present = [name for name in optional_files if (scene_dir / name).exists()]
+        optional_missing = [name for name in optional_files if not (scene_dir / name).exists()]
+
+        if missing:
+            missing_any = True
+            print(f"[MISSING] {scene_dir.name}: missing required files: {', '.join(missing)}")
+        else:
+            print(f"[OK] {scene_dir.name}: required files present")
+
+        if optional_present:
+            print(f"  optional present: {', '.join(optional_present)}")
+        if optional_missing:
+            print(f"  optional missing: {', '.join(optional_missing)}")
+
+    if legacy_files or missing_any:
+        print("Validation status: issues found")
+        return 1
+
+    print("Validation status: all checked scene folders contain the expected required files")
+    return 0
+
+
 def run_o1(config: O1Config, max_scenes: int | None, dry_run: bool) -> int:
     scenes = discover_scenes(config.middlebury_root)
     discovered_count = len(scenes)
@@ -298,4 +352,11 @@ def main() -> int:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
 
+    if args.validate_results:
+        return validate_o1_results(config.synthetic_dir)
+
     return run_o1(config, args.max_scenes, args.dry_run)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
