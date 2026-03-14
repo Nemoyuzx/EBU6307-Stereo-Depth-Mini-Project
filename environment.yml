@@ -1,0 +1,16 @@
+name: ebu6307-stereo
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - scipy
+  - matplotlib
+  - pillow
+  - scikit-image
+  - opencv
+  - pandas
+  - pyyaml
+  - tqdm
+  - jupyter
