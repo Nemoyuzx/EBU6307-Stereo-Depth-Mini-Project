@@ -224,7 +224,11 @@ def validate_o1_results(synthetic_dir: Path) -> int:
         print(f"Synthetic results directory not found: {synthetic_dir}", file=sys.stderr)
         return 1
 
-    legacy_files = sorted(path for path in synthetic_dir.iterdir() if path.is_file())
+    legacy_files = sorted(
+        path
+        for path in synthetic_dir.iterdir()
+        if path.is_file() and not path.name.startswith(".")
+    )
     scene_dirs = sorted(path for path in synthetic_dir.iterdir() if path.is_dir())
 
     if legacy_files:
