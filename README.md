@@ -68,6 +68,12 @@ Run the minimal O1 baseline with:
 python -m ebu6307_stereo --config configs/dataset_paths.example.yaml --profile local --dry-run
 ```
 
+Target one exact scene directory deterministically:
+
+```bash
+python -m ebu6307_stereo --config configs/dataset_paths.example.yaml --profile local --scene-name sample_scene --dry-run
+```
+
 Validate previously written O1 synthetic outputs without changing anything:
 
 ```bash

@@ -42,6 +42,10 @@ def parse_args() -> argparse.Namespace:
         help="Maximum number of discovered scenes to process. Use 0 to report discovery only.",
     )
     parser.add_argument(
+        "--scene-name",
+        help="Process or validate only the scene directory with this exact name.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Report config and discovered scenes without writing outputs.",
@@ -121,6 +125,12 @@ def discover_scenes(middlebury_root: Path) -> list[Path]:
         if (candidate / "im0.png").exists() and (candidate / "im1.png").exists():
             scenes.append(candidate)
     return scenes
+
+
+def filter_scene_dirs(scene_dirs: list[Path], scene_name: str | None) -> list[Path]:
+    if scene_name is None:
+        return scene_dirs
+    return [path for path in scene_dirs if path.name == scene_name]
 
 
 def load_rgb(path: Path) -> Any:
@@ -215,7 +225,7 @@ def write_scene_metadata(scene_output_dir: Path, scene_name: str, shift_pixels: 
     )
 
 
-def validate_o1_results(synthetic_dir: Path) -> int:
+def validate_o1_results(synthetic_dir: Path, scene_name: str | None = None) -> int:
     required_files = ("im0.png", "im1.png", "disp0.pfm")
     optional_files = ("calib.txt",)
 
@@ -230,6 +240,10 @@ def validate_o1_results(synthetic_dir: Path) -> int:
         if path.is_file() and not path.name.startswith(".")
     )
     scene_dirs = sorted(path for path in synthetic_dir.iterdir() if path.is_dir())
+    scene_dirs = filter_scene_dirs(scene_dirs, scene_name)
+
+    if scene_name is not None:
+        print(f"Scene filter: {scene_name}")
 
     if legacy_files:
         print("Unexpected flat files found directly under the synthetic results root:")
@@ -242,6 +256,10 @@ def validate_o1_results(synthetic_dir: Path) -> int:
         print("Scene folders found: none")
     else:
         print(f"Scene folders found: {len(scene_dirs)}")
+
+    if scene_name is not None and not scene_dirs:
+        print(f"No result scene directories matched --scene-name {scene_name!r}.", file=sys.stderr)
+        return 1
 
     missing_any = False
     for scene_dir in scene_dirs:
@@ -268,9 +286,10 @@ def validate_o1_results(synthetic_dir: Path) -> int:
     return 0
 
 
-def run_o1(config: O1Config, max_scenes: int | None, dry_run: bool) -> int:
-    scenes = discover_scenes(config.middlebury_root)
-    discovered_count = len(scenes)
+def run_o1(config: O1Config, max_scenes: int | None, dry_run: bool, scene_name: str | None) -> int:
+    discovered_scenes = discover_scenes(config.middlebury_root)
+    discovered_count = len(discovered_scenes)
+    scenes = filter_scene_dirs(discovered_scenes, scene_name)
 
     if max_scenes is not None:
         if max_scenes < 0:
@@ -281,6 +300,8 @@ def run_o1(config: O1Config, max_scenes: int | None, dry_run: bool) -> int:
     print(f"Repository root: {config.repo_root}")
     print(f"Middlebury root: {config.middlebury_root}")
     print(f"Discovered scenes with im0.png/im1.png: {discovered_count}")
+    if scene_name is not None:
+        print(f"Scene filter: {scene_name}")
     if scenes:
         print("Scenes to process: " + ", ".join(scene.name for scene in scenes))
     else:
@@ -304,6 +325,13 @@ def run_o1(config: O1Config, max_scenes: int | None, dry_run: bool) -> int:
         print(
             f"No scene directories containing im0.png and im1.png were found under {config.middlebury_root}.\n"
             "Add Middlebury scenes, or rerun with --dry-run or --max-scenes 0.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if scene_name is not None and not scenes:
+        print(
+            f"No discovered scenes matched --scene-name {scene_name!r} under {config.middlebury_root}.",
             file=sys.stderr,
         )
         return 1
@@ -357,9 +385,9 @@ def main() -> int:
         return 2
 
     if args.validate_results:
-        return validate_o1_results(config.synthetic_dir)
+        return validate_o1_results(config.synthetic_dir, args.scene_name)
 
-    return run_o1(config, args.max_scenes, args.dry_run)
+    return run_o1(config, args.max_scenes, args.dry_run, args.scene_name)
 
 
 if __name__ == "__main__":
