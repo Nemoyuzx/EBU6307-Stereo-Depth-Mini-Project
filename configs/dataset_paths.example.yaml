@@ -1,0 +1,17 @@
+# Example dataset and output roots for the EBU6307 project.
+# Copy to a local untracked config later if needed.
+
+local:
+  repo_root: /Users/nemoyu/Desktop/openclaw-operate
+  datasets_root: /Users/nemoyu/Desktop/openclaw-operate/workspace/data
+  middlebury_root: /Users/nemoyu/Desktop/openclaw-operate/workspace/data/middlebury
+
+remote:
+  repo_root: /root/code/new_folder/openclaw-operate
+  datasets_root: /root/code/new_folder/openclaw-operate/workspace/data
+  middlebury_root: /root/code/new_folder/openclaw-operate/workspace/data/middlebury
+
+results:
+  o1_root: results/O1
+  o1_synthetic_dir: results/O1/synthetic
+  o1_metrics_file: results/O1/metrics/ssim.csv

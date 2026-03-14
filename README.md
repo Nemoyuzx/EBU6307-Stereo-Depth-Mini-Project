@@ -7,6 +7,7 @@ Minimal bootstrap for the EBU6307 stereo depth assignment. This repository is or
 ```text
 .
 ├── codes/                 # Source, tests, packaging
+├── configs/               # Example path configuration
 ├── docs/                  # Milestone notes / TODOs
 ├── results/               # Assignment outputs for O1 -> O4
 ├── scripts/               # Local / remote bootstrap helpers
@@ -52,6 +53,12 @@ The script only:
 2. `O2`: SIFT feature extraction, repeatability evaluation, visualizations
 3. `O3`: SIFT-based stereo matching and disparity error reporting
 4. `O4`: transformer-based stereo baseline with 5-fold evaluation under the 16 GB GPU limit
+
+## Dataset path setup
+
+Configure dataset and result roots in [`configs/dataset_paths.example.yaml`](/Users/nemoyu/Desktop/openclaw-operate/configs/dataset_paths.example.yaml).
+
+The expected Middlebury scene layout is documented in [`docs/dataset_paths.md`](/Users/nemoyu/Desktop/openclaw-operate/docs/dataset_paths.md). For the verified remote environment, prefer `/root/code/new_folder/openclaw-operate/workspace/data` as the writable dataset base.
 
 ## Immediate next step
 
