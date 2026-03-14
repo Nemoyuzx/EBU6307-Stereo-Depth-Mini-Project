@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from .pfm import write_pfm
 
 
 @dataclass(frozen=True)
@@ -125,7 +128,7 @@ def load_rgb(path: Path) -> Any:
 def synthesize_shift(image: Any, shift_pixels: int) -> Any:
     import numpy as np
 
-    # Fill exposed columns with zeros so the synthetic change remains obvious.
+    # Shift the reference image horizontally to form a crude synthetic right view.
     shifted = np.zeros_like(image)
     if shift_pixels == 0:
         shifted[:] = image
@@ -136,10 +139,24 @@ def synthesize_shift(image: Any, shift_pixels: int) -> Any:
         return shifted
 
     if shift_pixels > 0:
-        shifted[:, shift_pixels:, :] = image[:, : width - shift_pixels, :]
+        shifted[:, : width - shift_pixels, :] = image[:, shift_pixels:, :]
     else:
-        shifted[:, : width + shift_pixels, :] = image[:, -shift_pixels:, :]
+        shifted[:, -shift_pixels:, :] = image[:, : width + shift_pixels, :]
     return shifted
+
+
+def synthesize_disparity(height: int, width: int, shift_pixels: int) -> Any:
+    import numpy as np
+
+    disparity = np.zeros((height, width), dtype=np.float32)
+    if shift_pixels == 0 or abs(shift_pixels) >= width:
+        return disparity
+
+    if shift_pixels > 0:
+        disparity[:, shift_pixels:] = float(shift_pixels)
+    else:
+        disparity[:, : width + shift_pixels] = float(-shift_pixels)
+    return disparity
 
 
 def compute_ssim(left_image: Any, synthetic_image: Any) -> float:
@@ -159,12 +176,38 @@ def ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def copy_if_exists(source: Path, destination: Path) -> bool:
+    if not source.exists():
+        return False
+    ensure_parent(destination)
+    shutil.copy2(source, destination)
+    return True
+
+
 def write_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) -> None:
     ensure_parent(metrics_file)
     with metrics_file.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=["scene", "shift_pixels", "ssim"])
         writer.writeheader()
         writer.writerows(rows)
+
+
+def write_scene_metadata(scene_output_dir: Path, scene_name: str, shift_pixels: int, calib_copied: bool) -> None:
+    metadata_path = scene_output_dir / "README.txt"
+    metadata_path.write_text(
+        "\n".join(
+            [
+                f"scene: {scene_name}",
+                "generator: minimal O1 baseline",
+                "im0.png: original left image copied from the source scene",
+                "im1.png: synthetic right image created by horizontal shift",
+                f"shift_pixels: {shift_pixels}",
+                f"calib.txt: {'copied' if calib_copied else 'missing in source scene'}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def run_o1(config: O1Config, max_scenes: int | None, dry_run: bool) -> int:
@@ -219,8 +262,20 @@ def run_o1(config: O1Config, max_scenes: int | None, dry_run: bool) -> int:
 
         left = load_rgb(scene_dir / "im0.png")
         synthetic = synthesize_shift(left, config.shift_pixels)
-        output_path = config.synthetic_dir / f"{scene_dir.name}_shift.png"
-        Image.fromarray(synthetic).save(output_path)
+        disparity = synthesize_disparity(left.shape[0], left.shape[1], config.shift_pixels)
+        scene_output_dir = config.synthetic_dir / scene_dir.name
+        scene_output_dir.mkdir(parents=True, exist_ok=True)
+
+        left_output_path = scene_output_dir / "im0.png"
+        right_output_path = scene_output_dir / "im1.png"
+        disparity_output_path = scene_output_dir / "disp0.pfm"
+
+        copy_if_exists(scene_dir / "im0.png", left_output_path)
+        Image.fromarray(synthetic).save(right_output_path)
+        write_pfm(disparity_output_path, disparity)
+
+        calib_copied = copy_if_exists(scene_dir / "calib.txt", scene_output_dir / "calib.txt")
+        write_scene_metadata(scene_output_dir, scene_dir.name, config.shift_pixels, calib_copied)
         metric_rows.append(
             {
                 "scene": scene_dir.name,
@@ -228,7 +283,7 @@ def run_o1(config: O1Config, max_scenes: int | None, dry_run: bool) -> int:
                 "ssim": f"{compute_ssim(left, synthetic):.6f}",
             }
         )
-        print(f"Wrote synthetic image: {output_path}")
+        print(f"Wrote synthetic scene: {scene_output_dir} (calib.txt copied: {'yes' if calib_copied else 'no'})")
 
     write_metrics(config.metrics_file, metric_rows)
     print(f"Wrote SSIM summary: {config.metrics_file}")

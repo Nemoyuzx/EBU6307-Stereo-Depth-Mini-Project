@@ -66,6 +66,20 @@ Run the minimal O1 baseline with:
 python -m ebu6307_stereo --config configs/dataset_paths.example.yaml --profile local --dry-run
 ```
 
+When run without `--dry-run`, O1 writes one scene-like folder per processed sample under `results/O1b_synthetic_data/`:
+
+```text
+results/O1b_synthetic_data/
+└── <scene_name>/
+    ├── im0.png
+    ├── im1.png
+    ├── disp0.pfm
+    ├── calib.txt      # copied when present in the source scene
+    └── README.txt
+```
+
+`im0.png` is copied from the source left image, `im1.png` is a simple horizontally shifted synthetic right image, and `disp0.pfm` is the matching constant-disparity baseline for the left view with exposed columns written as zero.
+
 ## Immediate next step
 
 Start with O1-first development:
