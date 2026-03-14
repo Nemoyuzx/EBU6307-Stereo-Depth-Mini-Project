@@ -59,6 +59,7 @@ The script only:
 Configure dataset and result roots in [`configs/dataset_paths.example.yaml`](/Users/nemoyu/Desktop/openclaw-operate/configs/dataset_paths.example.yaml).
 
 The expected Middlebury scene layout is documented in [`docs/dataset_paths.md`](/Users/nemoyu/Desktop/openclaw-operate/docs/dataset_paths.md). For the verified remote environment, prefer `/root/code/new_folder/openclaw-operate/workspace/data` as the writable dataset base.
+If remote stereo-video datasets are used as a temporary O1 engineering fallback, keep them separate from final assignment data as described in [`docs/remote_stereo_fallback.md`](/Users/nemoyu/Desktop/openclaw-operate/docs/remote_stereo_fallback.md).
 
 Run the minimal O1 baseline with:
 
