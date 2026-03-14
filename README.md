@@ -60,6 +60,12 @@ Configure dataset and result roots in [`configs/dataset_paths.example.yaml`](/Us
 
 The expected Middlebury scene layout is documented in [`docs/dataset_paths.md`](/Users/nemoyu/Desktop/openclaw-operate/docs/dataset_paths.md). For the verified remote environment, prefer `/root/code/new_folder/openclaw-operate/workspace/data` as the writable dataset base.
 
+Run the minimal O1 baseline with:
+
+```bash
+python -m ebu6307_stereo --config configs/dataset_paths.example.yaml --profile local --dry-run
+```
+
 ## Immediate next step
 
 Start with O1-first development:

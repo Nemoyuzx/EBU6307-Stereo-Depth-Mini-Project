@@ -12,6 +12,8 @@ remote:
   middlebury_root: /root/code/new_folder/openclaw-operate/workspace/data/middlebury
 
 results:
-  o1_root: results/O1
-  o1_synthetic_dir: results/O1/synthetic
-  o1_metrics_file: results/O1/metrics/ssim.csv
+  o1b_synthetic_dir: results/O1b_synthetic_data
+  o1c_metrics_file: results/O1c_synthetic_data/SSIM.csv
+
+o1:
+  shift_pixels: 8
