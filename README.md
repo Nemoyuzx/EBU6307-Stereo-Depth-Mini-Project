@@ -42,6 +42,7 @@ bash scripts/setup_remote_conda.sh
 
 The script only:
 - creates a conda env from `environment.yml`
+- attempts to install PyTorch for O4 (`cu121` wheels when `nvidia-smi` is present, CPU torch otherwise)
 - installs this repository in editable mode inside that env
 - creates safe working folders under `/root/code/new_folder`
 - creates result skeletons under the project directory
@@ -52,14 +53,17 @@ The script only:
 1. `O1`: synthetic stereo pair generation and SSIM evaluation
 2. `O2`: SIFT feature extraction, repeatability evaluation, visualizations
 3. `O3`: SIFT-based stereo matching and disparity error reporting
-4. `O4`: transformer-based stereo baseline with 5-fold evaluation under the 16 GB GPU limit
+4. `O4`: trainable token-matching stereo baseline with a PyTorch/CUDA-capable route under the 16 GB GPU limit
 
 ## Dataset path setup
 
 Configure dataset and result roots in [`configs/dataset_paths.example.yaml`](/Users/nemoyu/Desktop/openclaw-operate/configs/dataset_paths.example.yaml).
 
+The official assignment target is Middlebury-style stereo scenes. Do not mix temporary remote stereo-video fallback data with final assignment data or default result folders.
+
 The expected Middlebury scene layout is documented in [`docs/dataset_paths.md`](/Users/nemoyu/Desktop/openclaw-operate/docs/dataset_paths.md). For the verified remote environment, prefer `/root/code/new_folder/openclaw-operate/workspace/data` as the writable dataset base.
-If remote stereo-video datasets are used as a temporary O1 engineering fallback, keep them separate from final assignment data as described in [`docs/remote_stereo_fallback.md`](/Users/nemoyu/Desktop/openclaw-operate/docs/remote_stereo_fallback.md).
+If remote stereo-video datasets are used as a temporary O1 engineering fallback, use [`configs/dataset_paths.fallback.example.yaml`](/Users/nemoyu/Desktop/openclaw-operate/configs/dataset_paths.fallback.example.yaml) and follow [`docs/fallback_data_policy.md`](/Users/nemoyu/Desktop/openclaw-operate/docs/fallback_data_policy.md).
+The verified extraction path for that temporary input source remains documented in [`docs/remote_stereo_fallback.md`](/Users/nemoyu/Desktop/openclaw-operate/docs/remote_stereo_fallback.md).
 The standalone fallback extractor can be invoked without touching the main O1 CLI: `PYTHONPATH=codes/src python3 -m ebu6307_stereo.fallback_extract --left-video ... --right-video ... --output-dir workspace/data/tmp_remote_stereo_fallback`.
 
 Run the minimal O1 baseline with:
@@ -67,6 +71,56 @@ Run the minimal O1 baseline with:
 ```bash
 python -m ebu6307_stereo --config configs/dataset_paths.example.yaml --profile local --dry-run
 ```
+
+Remove `--dry-run` to write O1 outputs into `results/O1b_synthetic_data/` and the SSIM summary into `results/O1c_synthetic_data/SSIM.csv`.
+
+Run the minimal O2 baseline with:
+
+```bash
+python -m ebu6307_stereo --config configs/dataset_paths.example.yaml --profile local --objective o2 --dry-run
+```
+
+Run the minimal O3 baseline with:
+
+```bash
+python -m ebu6307_stereo --config configs/dataset_paths.example.yaml --profile local --objective o3 --dry-run
+```
+
+Run the minimal O4 baseline with:
+
+```bash
+python -m ebu6307_stereo --config configs/dataset_paths.example.yaml --profile local --objective o4 --dry-run
+```
+
+The O4 config block now exposes backend selection and model/training capacity directly:
+- `backend`: `auto`, `torch`, or `numpy`
+- `device`: `auto`, `cuda`, or `cpu`
+- `execution_mode`: `baseline` or `dinov2_cost_volume`
+- `dinov2_model_name`: DINOv2 selector for the supported local small/base routes, for example `facebook/dinov2-base` or `dinov2_vitb14_reg`
+- `dinov2_repo_path`: optional local path to prepend to `sys.path` before importing `dinov2.hub.backbones`
+- `dinov2_checkpoint_path`: explicit local `.pth` checkpoint file for DINOv2 weights
+- `disparity_regression`: `quadratic` or `soft_argmax`
+- `model_dim`, `encoder_hidden_dim`, `encoder_layers`
+- `training_epochs`, `training_learning_rate`, `training_batch_size`, `inference_batch_size`
+
+`backend: auto` prefers the torch path and moves to CUDA automatically when `torch.cuda.is_available()` is true. The `baseline` mode can still run through the NumPy path when torch is unavailable; `dinov2_cost_volume` requires torch. This mode is selected explicitly and does not silently fall back to the baseline when DINOv2 loading fails. The active O4 DINOv2 weights are loaded from `o4.dinov2_checkpoint_path`, not from Hugging Face cache, and model construction now requires a local `dinov2` Python implementation instead of `torch.hub`; set `o4.dinov2_repo_path` or `--o4-dinov2-repo` when the package is only available from a local checkout. The run fails clearly if the checkpoint file is missing or the configured repo path does not expose `dinov2.hub.backbones`.
+
+To run the current O4 DINOv2 candidate path directly from the CLI:
+
+```bash
+python -m ebu6307_stereo \
+    --config configs/dataset_paths.example.yaml \
+    --profile remote \
+    --objective o4 \
+    --scene-name chess3 \
+    --o4-execution-mode dinov2_cost_volume \
+    --o4-dinov2-model facebook/dinov2-base \
+    --o4-dinov2-repo /root/code/new_folder/openclaw-operate/workspace/external/dinov2 \
+    --o4-dinov2-checkpoint /limx_embop/tos/users/Nemo/self-work/models/dinov2_vitb14_reg4_pretrain.pth \
+    --o4-regression-mode quadratic
+```
+
+The `dinov2_cost_volume` route uses pretrained DINOv2 dense patch descriptors from the explicit local checkpoint file, constructs an explicit disparity cost volume by row-wise correlation, and keeps the existing consistency filtering and fine-detail refinement stages. `--o4-dinov2-repo` is optional when `dinov2` is already installed in the active environment; otherwise point it at the local checkout root that contains `dinov2/hub/backbones.py`.
 
 Target one exact scene directory deterministically:
 
@@ -80,7 +134,25 @@ Validate previously written O1 synthetic outputs without changing anything:
 python -m ebu6307_stereo --config configs/dataset_paths.example.yaml --profile local --validate-results
 ```
 
-When run without `--dry-run`, O1 writes one scene-like folder per processed sample under `results/O1b_synthetic_data/`:
+Validate previously written O2 outputs without changing anything:
+
+```bash
+python -m ebu6307_stereo --config configs/dataset_paths.example.yaml --profile local --objective o2 --validate-results
+```
+
+Validate previously written O3 outputs without changing anything:
+
+```bash
+python -m ebu6307_stereo --config configs/dataset_paths.example.yaml --profile local --objective o3 --validate-results
+```
+
+Validate previously written O4 outputs without changing anything:
+
+```bash
+python -m ebu6307_stereo --config configs/dataset_paths.example.yaml --profile local --objective o4 --validate-results
+```
+
+When run without `--dry-run`, O1 writes one scene-like folder per processed sample under `results/O1b_synthetic_data/` and the summary CSV under `results/O1c_synthetic_data/SSIM.csv`:
 
 ```text
 results/O1b_synthetic_data/
@@ -94,10 +166,68 @@ results/O1b_synthetic_data/
 
 `im0.png` is copied from the source left image, `im1.png` is a simple horizontally shifted synthetic right image, and `disp0.pfm` is the matching constant-disparity baseline for the left view with exposed columns written as zero.
 
-## Immediate next step
+When run without `--dry-run`, O2 writes per-scene SIFT outputs under `results/O2a_sift/` and `results/O2b_sift/`, plus a summary CSV under `results/O2c_sift/metrics.csv`:
 
-Start with O1-first development:
-- wire dataset path handling
-- implement a tiny synthetic warping baseline
-- write outputs into `results/O1*`
-- keep all scripts terminal-runnable
+```text
+results/O2a_sift/
+└── <scene_name>/
+    ├── im0_keypoints.png
+    ├── im1_keypoints.png
+    └── README.txt
+
+results/O2b_sift/
+└── <scene_name>/
+    ├── sift_matches.png
+    └── README.txt
+```
+
+The O2 baseline uses OpenCV SIFT on `im0.png` and `im1.png`, applies a relaxed Lowe ratio cutoff, keeps bidirectional agreement as a conditional filter, then runs fundamental-matrix RANSAC when enough candidates remain, and reports a simple repeatability proxy as `ratio_test_matches / min(left_keypoints, right_keypoints)`.
+
+When run without `--dry-run`, O3 writes per-scene disparity outputs under `results/O3a_disparity/` and error analysis outputs under `results/O3b_disparity/`, plus a summary CSV under `results/O3c_disparity/metrics.csv`:
+
+```text
+results/O3a_disparity/
+└── <scene_name>/
+    ├── disp0.pfm
+    ├── disp0.png
+    └── README.txt
+
+results/O3b_disparity/
+└── <scene_name>/
+    ├── error_map.png
+    └── README.txt
+```
+
+The O3 baseline now derives disparity from SIFT feature correspondences on `im0.png` and `im1.png`, filters matches using the O2-style ratio/mutual/RANSAC path plus a rectified stereo constraint, then interpolates those feature disparities into a runnable dense left-view estimate before reporting `MAE`, `RMSE`, and `bad_1px` when the source scene includes `disp0.pfm`.
+
+When run without `--dry-run`, O4 writes per-scene token-matching outputs under `results/O4a_transformer/` and analysis outputs under `results/O4b_transformer/`, plus per-scene and per-fold CSV summaries under `results/O4c_transformer/`:
+
+```text
+results/O4a_transformer/
+└── <scene_name>/
+    ├── disp0.pfm
+    ├── disp0.png
+    └── README.txt
+
+results/O4b_transformer/
+└── <scene_name>/
+    ├── confidence.png
+    ├── error_map.png
+    └── README.txt
+
+results/O4c_transformer/
+├── metrics.csv
+└── fold_summary.csv
+```
+
+O4 now exposes two explicit execution modes. `baseline` keeps the existing trainable token-projection path. `dinov2_cost_volume` uses pretrained DINOv2 dense descriptors from an explicit local checkpoint and an explicit disparity cost volume with optional `soft_argmax` regression. The selected mode is controlled by config or CLI, and the DINOv2 path does not silently fall back to the baseline. The current experimental surface keeps the local DINOv2 base route documented and supported. A local checkout can be wired in explicitly through `o4.dinov2_repo_path` or `--o4-dinov2-repo`; remote `torch.hub` loading is still disabled.
+
+## Current formal baseline state
+
+The current O1-O4 formal baseline uses `configs/dataset_paths.example.yaml` as the documented path map:
+- O1 synthetic scenes: `results/O1b_synthetic_data/`
+- O1 metrics: `results/O1c_synthetic_data/SSIM.csv`
+- O2 outputs: `results/O2a_sift/`, `results/O2b_sift/`, `results/O2c_sift/metrics.csv`
+- O3 outputs: `results/O3a_disparity/`, `results/O3b_disparity/`, `results/O3c_disparity/metrics.csv`
+- O4 outputs: `results/O4a_transformer/`, `results/O4b_transformer/`, `results/O4c_transformer/metrics.csv`
+- O4 fold summary: `results/O4c_transformer/fold_summary.csv`

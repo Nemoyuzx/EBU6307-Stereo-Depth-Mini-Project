@@ -1,0 +1,238 @@
+from __future__ import annotations
+
+import csv
+import shutil
+import sys
+from pathlib import Path
+from typing import Any
+
+from .common import discover_scenes, ensure_parent, filter_scene_dirs, load_rgb
+from .config import O1Config
+from .pfm import write_pfm
+
+
+def synthesize_shift(image: Any, shift_pixels: int) -> Any:
+    import numpy as np
+
+    shifted = np.zeros_like(image)
+    if shift_pixels == 0:
+        shifted[:] = image
+        return shifted
+
+    width = image.shape[1]
+    if abs(shift_pixels) >= width:
+        return shifted
+
+    if shift_pixels > 0:
+        shifted[:, : width - shift_pixels, :] = image[:, shift_pixels:, :]
+    else:
+        shifted[:, -shift_pixels:, :] = image[:, : width + shift_pixels, :]
+    return shifted
+
+
+def synthesize_disparity(height: int, width: int, shift_pixels: int) -> Any:
+    import numpy as np
+
+    disparity = np.zeros((height, width), dtype=np.float32)
+    if shift_pixels == 0 or abs(shift_pixels) >= width:
+        return disparity
+
+    if shift_pixels > 0:
+        disparity[:, shift_pixels:] = float(shift_pixels)
+    else:
+        disparity[:, : width + shift_pixels] = float(-shift_pixels)
+    return disparity
+
+
+def compute_ssim(left_image: Any, synthetic_image: Any) -> float:
+    from skimage.metrics import structural_similarity
+
+    return float(structural_similarity(left_image, synthetic_image, channel_axis=2, data_range=255))
+
+
+def read_metrics(metrics_file: Path) -> list[dict[str, str]]:
+    if not metrics_file.exists():
+        return []
+
+    with metrics_file.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        return [
+            {"scene": row.get("scene", ""), "shift_pixels": row.get("shift_pixels", ""), "ssim": row.get("ssim", "")}
+            for row in reader
+            if row.get("scene")
+        ]
+
+
+def copy_if_exists(source: Path, destination: Path) -> bool:
+    if not source.exists():
+        return False
+    ensure_parent(destination)
+    shutil.copy2(source, destination)
+    return True
+
+
+def write_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) -> None:
+    existing_rows = read_metrics(metrics_file)
+    rows_by_scene = {str(row["scene"]): row for row in rows}
+    merged_rows: list[dict[str, str | float | int]] = []
+
+    for row in existing_rows:
+        scene_name = row["scene"]
+        replacement = rows_by_scene.pop(scene_name, None)
+        merged_rows.append(replacement if replacement is not None else row)
+
+    merged_rows.extend(rows_by_scene.values())
+
+    ensure_parent(metrics_file)
+    with metrics_file.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["scene", "shift_pixels", "ssim"])
+        writer.writeheader()
+        writer.writerows(merged_rows)
+
+
+def write_scene_metadata(scene_output_dir: Path, scene_name: str, shift_pixels: int, calib_copied: bool) -> None:
+    metadata_path = scene_output_dir / "README.txt"
+    metadata_path.write_text(
+        "\n".join(
+            [
+                f"scene: {scene_name}",
+                "generator: minimal O1 baseline",
+                "im0.png: original left image copied from the source scene",
+                "im1.png: synthetic right image created by horizontal shift",
+                f"shift_pixels: {shift_pixels}",
+                f"calib.txt: {'copied' if calib_copied else 'missing in source scene'}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def validate_results(synthetic_dir: Path, scene_name: str | None = None) -> int:
+    required_files = ("im0.png", "im1.png", "disp0.pfm")
+    optional_files = ("calib.txt",)
+
+    print(f"Validating synthetic results directory: {synthetic_dir}")
+    if not synthetic_dir.exists():
+        print(f"Synthetic results directory not found: {synthetic_dir}", file=sys.stderr)
+        return 1
+
+    legacy_files = sorted(path for path in synthetic_dir.iterdir() if path.is_file() and not path.name.startswith("."))
+    scene_dirs = sorted(path for path in synthetic_dir.iterdir() if path.is_dir())
+    scene_dirs = filter_scene_dirs(scene_dirs, scene_name)
+
+    if scene_name is not None:
+        print(f"Scene filter: {scene_name}")
+
+    if legacy_files:
+        print("Unexpected flat files found directly under the synthetic results root:")
+        for path in legacy_files:
+            print(f"  - {path.name}")
+    else:
+        print("Unexpected flat files found directly under the synthetic results root: none")
+
+    if not scene_dirs:
+        print("Scene folders found: none")
+    else:
+        print(f"Scene folders found: {len(scene_dirs)}")
+
+    if scene_name is not None and not scene_dirs:
+        print(f"No result scene directories matched --scene-name {scene_name!r}.", file=sys.stderr)
+        return 1
+
+    missing_any = False
+    for scene_dir in scene_dirs:
+        missing = [name for name in required_files if not (scene_dir / name).exists()]
+        optional_present = [name for name in optional_files if (scene_dir / name).exists()]
+        optional_missing = [name for name in optional_files if not (scene_dir / name).exists()]
+
+        if missing:
+            missing_any = True
+            print(f"[MISSING] {scene_dir.name}: missing required files: {', '.join(missing)}")
+        else:
+            print(f"[OK] {scene_dir.name}: required files present")
+
+        if optional_present:
+            print(f"  optional present: {', '.join(optional_present)}")
+        if optional_missing:
+            print(f"  optional missing: {', '.join(optional_missing)}")
+
+    if legacy_files or missing_any:
+        print("Validation status: issues found")
+        return 1
+
+    print("Validation status: all checked scene folders contain the expected required files")
+    return 0
+
+
+def run(config: O1Config, max_scenes: int | None, dry_run: bool, scene_name: str | None) -> int:
+    discovered_scenes = discover_scenes(config.middlebury_root)
+    discovered_count = len(discovered_scenes)
+    scenes = filter_scene_dirs(discovered_scenes, scene_name)
+
+    if max_scenes is not None:
+        if max_scenes < 0:
+            print("--max-scenes must be zero or greater.", file=sys.stderr)
+            return 2
+        scenes = scenes[:max_scenes]
+
+    print(f"Repository root: {config.repo_root}")
+    print(f"Middlebury root: {config.middlebury_root}")
+    print(f"Discovered scenes with im0.png/im1.png: {discovered_count}")
+    if scene_name is not None:
+        print(f"Scene filter: {scene_name}")
+    print("Scenes to process: " + ", ".join(scene.name for scene in scenes) if scenes else "Scenes to process: none")
+
+    if not config.middlebury_root.exists():
+        if dry_run or max_scenes == 0:
+            print("Middlebury root does not exist yet. Discovery-only mode completed without processing.")
+            return 0
+        print(
+            f"Middlebury root not found: {config.middlebury_root}\n"
+            "Place dataset scenes there, or rerun with --dry-run or --max-scenes 0.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if discovered_count == 0:
+        if dry_run or max_scenes == 0:
+            print("No valid scenes found. Discovery-only mode completed without processing.")
+            return 0
+        print(
+            f"No scene directories containing im0.png and im1.png were found under {config.middlebury_root}.\n"
+            "Add Middlebury scenes, or rerun with --dry-run or --max-scenes 0.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if scene_name is not None and not scenes:
+        print(f"No discovered scenes matched --scene-name {scene_name!r} under {config.middlebury_root}.", file=sys.stderr)
+        return 1
+
+    if dry_run or max_scenes == 0:
+        print("Dry run requested; no outputs were written.")
+        return 0
+
+    from PIL import Image
+
+    config.synthetic_dir.mkdir(parents=True, exist_ok=True)
+    metric_rows: list[dict[str, str | float | int]] = []
+    for scene_dir in scenes:
+        left = load_rgb(scene_dir / "im0.png")
+        synthetic = synthesize_shift(left, config.shift_pixels)
+        disparity = synthesize_disparity(left.shape[0], left.shape[1], config.shift_pixels)
+        scene_output_dir = config.synthetic_dir / scene_dir.name
+        scene_output_dir.mkdir(parents=True, exist_ok=True)
+
+        copy_if_exists(scene_dir / "im0.png", scene_output_dir / "im0.png")
+        Image.fromarray(synthetic).save(scene_output_dir / "im1.png")
+        write_pfm(scene_output_dir / "disp0.pfm", disparity)
+
+        calib_copied = copy_if_exists(scene_dir / "calib.txt", scene_output_dir / "calib.txt")
+        write_scene_metadata(scene_output_dir, scene_dir.name, config.shift_pixels, calib_copied)
+        metric_rows.append({"scene": scene_dir.name, "shift_pixels": config.shift_pixels, "ssim": f"{compute_ssim(left, synthetic):.6f}"})
+        print(f"Wrote synthetic scene: {scene_output_dir} (calib.txt copied: {'yes' if calib_copied else 'no'})")
+
+    write_metrics(config.metrics_file, metric_rows)
+    print(f"Wrote SSIM summary: {config.metrics_file}")
+    return 0

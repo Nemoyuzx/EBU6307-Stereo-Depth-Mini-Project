@@ -1,0 +1,2 @@
+scene,valid_disparity_pixels,valid_ground_truth_pixels,mae,rmse,bad_1px
+o4_tiny_scene,4349,5632,0.040787,0.092794,0.000000

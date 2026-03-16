@@ -1,0 +1,2 @@
+scene,fold,token_grid,valid_disparity_pixels,valid_ground_truth_pixels,mae,rmse,bad_1px,mean_confidence,estimated_working_set_mb
+o4_tiny_scene,0,32x48,5632,5632,0.000000,0.000000,0.000000,0.561641,0.234375

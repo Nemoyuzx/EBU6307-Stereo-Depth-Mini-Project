@@ -14,3 +14,7 @@ dependencies:
   - pyyaml
   - tqdm
   - jupyter
+  - pip:
+      - transformers>=4.45,<5
+      - safetensors>=0.4,<1
+      - huggingface_hub>=0.34,<1

@@ -1,0 +1,6 @@
+fold,scene_count,scenes_with_ground_truth,mean_mae,mean_rmse,mean_bad_1px
+0,1,1,0.000000,0.000000,0.000000
+1,0,0,NA,NA,NA
+2,0,0,NA,NA,NA
+3,0,0,NA,NA,NA
+4,0,0,NA,NA,NA
