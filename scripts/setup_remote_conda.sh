@@ -63,15 +63,19 @@ else
   echo "PyTorch already available in ${ENV_NAME}; skipping torch install."
 fi
 
-if ! "${CONDA_BIN}" run -n "${ENV_NAME}" python -c "import transformers, huggingface_hub" >/dev/null 2>&1; then
-  echo "Installing Hugging Face tooling for the O4 DINOv2 transformers path."
-  "${CONDA_BIN}" run -n "${ENV_NAME}" python -m pip install \
-    "transformers>=4.45,<5" \
-    "safetensors>=0.4,<1" \
-    "huggingface_hub>=0.34,<1" \
-    || echo "Hugging Face tooling install failed; the O4 DINOv2 path will remain unavailable until installed."
+if [[ "${INSTALL_DINOV2_BACKUP:-0}" == "1" ]]; then
+  if ! "${CONDA_BIN}" run -n "${ENV_NAME}" python -c "import transformers, huggingface_hub" >/dev/null 2>&1; then
+    echo "Installing optional Hugging Face tooling for the O4 DINOv2 backup path."
+    "${CONDA_BIN}" run -n "${ENV_NAME}" python -m pip install \
+      "transformers>=4.45,<5" \
+      "safetensors>=0.4,<1" \
+      "huggingface_hub>=0.34,<1" \
+      || echo "Optional Hugging Face tooling install failed; the O4 DINOv2 backup path will remain unavailable until installed."
+  else
+    echo "Optional Hugging Face tooling already available in ${ENV_NAME}; skipping install."
+  fi
 else
-  echo "Hugging Face tooling already available in ${ENV_NAME}; skipping install."
+  echo "Skipping optional DINOv2 Hugging Face tooling install; whitelist-compliant submission path remains default."
 fi
 
 "${CONDA_BIN}" run -n "${ENV_NAME}" python -m pip install -e "${PROJECT_DIR}"

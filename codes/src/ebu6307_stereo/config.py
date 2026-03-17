@@ -101,19 +101,11 @@ class AppConfig:
 def load_config(config_path: Path, profile: str) -> AppConfig:
     from .o4_dinov2 import resolve_dinov2_checkpoint_path
 
-    try:
-        import yaml
-    except ImportError:
-        yaml = None
-
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
     with config_path.open("r", encoding="utf-8") as handle:
-        if yaml is None:
-            raw_config = parse_simple_yaml(handle.read())
-        else:
-            raw_config = yaml.safe_load(handle) or {}
+        raw_config = parse_simple_yaml(handle.read())
 
     if not isinstance(raw_config, dict):
         raise ValueError(f"Config file must contain a YAML mapping: {config_path}")

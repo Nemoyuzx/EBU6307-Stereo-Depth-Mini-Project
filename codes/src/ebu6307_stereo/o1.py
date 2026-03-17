@@ -45,9 +45,43 @@ def synthesize_disparity(height: int, width: int, shift_pixels: int) -> Any:
 
 
 def compute_ssim(left_image: Any, synthetic_image: Any) -> float:
-    from skimage.metrics import structural_similarity
+    import numpy as np
+    from scipy.ndimage import gaussian_filter
 
-    return float(structural_similarity(left_image, synthetic_image, channel_axis=2, data_range=255))
+    left = np.asarray(left_image, dtype=np.float64)
+    right = np.asarray(synthetic_image, dtype=np.float64)
+    if left.shape != right.shape:
+        raise ValueError("SSIM inputs must have the same shape.")
+
+    if left.ndim == 2:
+        left = left[..., None]
+        right = right[..., None]
+
+    data_range = 255.0
+    c1 = (0.01 * data_range) ** 2
+    c2 = (0.03 * data_range) ** 2
+    sigma = 1.5
+
+    channel_scores: list[float] = []
+    for channel_index in range(left.shape[2]):
+        x = left[..., channel_index]
+        y = right[..., channel_index]
+        mu_x = gaussian_filter(x, sigma=sigma)
+        mu_y = gaussian_filter(y, sigma=sigma)
+        mu_x_sq = mu_x * mu_x
+        mu_y_sq = mu_y * mu_y
+        mu_xy = mu_x * mu_y
+
+        sigma_x_sq = gaussian_filter(x * x, sigma=sigma) - mu_x_sq
+        sigma_y_sq = gaussian_filter(y * y, sigma=sigma) - mu_y_sq
+        sigma_xy = gaussian_filter(x * y, sigma=sigma) - mu_xy
+
+        numerator = (2.0 * mu_xy + c1) * (2.0 * sigma_xy + c2)
+        denominator = (mu_x_sq + mu_y_sq + c1) * (sigma_x_sq + sigma_y_sq + c2)
+        ssim_map = numerator / np.maximum(denominator, 1e-12)
+        channel_scores.append(float(np.mean(ssim_map)))
+
+    return float(np.mean(channel_scores))
 
 
 def read_metrics(metrics_file: Path) -> list[dict[str, str]]:
