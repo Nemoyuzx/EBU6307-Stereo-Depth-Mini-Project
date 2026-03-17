@@ -96,16 +96,15 @@ The O4 config block now exposes backend selection and model/training capacity di
 - `backend`: `auto`, `torch`, or `numpy`
 - `device`: `auto`, `cuda`, or `cpu`
 - `execution_mode`: `baseline` or `dinov2_cost_volume`
-- `dinov2_model_name`: DINOv2 selector for the supported local small/base routes, for example `facebook/dinov2-base` or `dinov2_vitb14_reg`
-- `dinov2_repo_path`: optional local path to prepend to `sys.path` before importing `dinov2.hub.backbones`
-- `dinov2_checkpoint_path`: explicit local `.pth` checkpoint file for DINOv2 weights
 - `disparity_regression`: `quadratic` or `soft_argmax`
 - `model_dim`, `encoder_hidden_dim`, `encoder_layers`
 - `training_epochs`, `training_learning_rate`, `training_batch_size`, `inference_batch_size`
 
-`backend: auto` prefers the torch path and moves to CUDA automatically when `torch.cuda.is_available()` is true. The `baseline` mode can still run through the NumPy path when torch is unavailable; `dinov2_cost_volume` requires torch. This mode is selected explicitly and does not silently fall back to the baseline when DINOv2 loading fails. The active O4 DINOv2 weights are loaded from `o4.dinov2_checkpoint_path`, not from Hugging Face cache, and model construction now requires a local `dinov2` Python implementation instead of `torch.hub`; set `o4.dinov2_repo_path` or `--o4-dinov2-repo` when the package is only available from a local checkout. The run fails clearly if the checkpoint file is missing or the configured repo path does not expose `dinov2.hub.backbones`.
+For the coursework submission path, keep `execution_mode: baseline` as the default. This is the original ViT-style trainable token-projection route and is the path intended to stay compatible with the restricted pip whitelist. `backend: auto` prefers the torch path and moves to CUDA automatically when `torch.cuda.is_available()` is true; the same baseline can still run through the NumPy path when torch is unavailable.
 
-To run the current O4 DINOv2 candidate path directly from the CLI:
+`dinov2_cost_volume` is retained only as an explicit backup/experimental path. It is not the default submission route, requires torch, and depends on extra local DINOv2 assets (`o4.dinov2_repo_path`, `o4.dinov2_checkpoint_path`) that are outside the restricted submission dependency set. It does not silently fall back to the baseline when DINOv2 loading fails.
+
+Only use the DINOv2 backup path when you intentionally want the non-default experimental route. Example:
 
 ```bash
 python -m ebu6307_stereo \
@@ -119,8 +118,6 @@ python -m ebu6307_stereo \
     --o4-dinov2-checkpoint /limx_embop/tos/users/Nemo/self-work/models/dinov2_vitb14_reg4_pretrain.pth \
     --o4-regression-mode quadratic
 ```
-
-The `dinov2_cost_volume` route uses pretrained DINOv2 dense patch descriptors from the explicit local checkpoint file, constructs an explicit disparity cost volume by row-wise correlation, and keeps the existing consistency filtering and fine-detail refinement stages. `--o4-dinov2-repo` is optional when `dinov2` is already installed in the active environment; otherwise point it at the local checkout root that contains `dinov2/hub/backbones.py`.
 
 Target one exact scene directory deterministically:
 
@@ -220,7 +217,7 @@ results/O4c_transformer/
 └── fold_summary.csv
 ```
 
-O4 now exposes two explicit execution modes. `baseline` keeps the existing trainable token-projection path. `dinov2_cost_volume` uses pretrained DINOv2 dense descriptors from an explicit local checkpoint and an explicit disparity cost volume with optional `soft_argmax` regression. The selected mode is controlled by config or CLI, and the DINOv2 path does not silently fall back to the baseline. The current experimental surface keeps the local DINOv2 base route documented and supported. A local checkout can be wired in explicitly through `o4.dinov2_repo_path` or `--o4-dinov2-repo`; remote `torch.hub` loading is still disabled.
+O4 exposes two explicit execution modes. `baseline` is the default submission path and keeps the original trainable token-projection route. `dinov2_cost_volume` is retained only as a documented backup/experimental route that uses pretrained DINOv2 dense descriptors from an explicit local checkpoint and an explicit disparity cost volume with optional `soft_argmax` regression. The selected mode is controlled by config or CLI, and the DINOv2 path does not silently fall back to the baseline. A local checkout can be wired in explicitly through `o4.dinov2_repo_path` or `--o4-dinov2-repo`; remote `torch.hub` loading remains disabled.
 
 ## Current formal baseline state
 
