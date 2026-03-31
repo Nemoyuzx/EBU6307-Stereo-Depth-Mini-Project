@@ -37,3 +37,10 @@ results/**
 
 logs/
 tmp/
+
+# Local reference materials / working folders not needed in git
+EBU6307 Mini Project.pdf
+EBU6307 Mini Project-中.pdf
+backup/
+ppt/
+workspace/
