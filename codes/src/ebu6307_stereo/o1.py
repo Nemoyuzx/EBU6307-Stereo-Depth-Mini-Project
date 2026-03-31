@@ -10,9 +10,9 @@ import numpy as np
 from PIL import Image
 from scipy.ndimage import gaussian_filter
 
-from .common import discover_scenes, ensure_parent, filter_scene_dirs, load_rgb
-from .config import O1Config
-from .pfm import write_pfm
+from common import discover_scenes, ensure_parent, filter_scene_dirs, load_rgb
+from config import O1Config
+from pfm import write_pfm
 
 
 def synthesize_shift(image: Any, shift_pixels: int) -> Any:

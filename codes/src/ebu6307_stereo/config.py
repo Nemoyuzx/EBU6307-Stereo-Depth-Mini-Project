@@ -204,7 +204,7 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
     dinov2_model_name = str(o4_block.get("dinov2_model_name", "facebook/dinov2-base")).strip() or "facebook/dinov2-base"
     dinov2_repo_value = o4_block.get("dinov2_repo_path")
     dinov2_checkpoint_value = o4_block.get("dinov2_checkpoint_path")
-    from .o4_dinov2 import resolve_dinov2_checkpoint_path
+    from o4_dinov2 import resolve_dinov2_checkpoint_path
     model_dim = max(4, int(o4_block.get("model_dim", 24)))
     encoder_hidden_dim = max(model_dim, int(o4_block.get("encoder_hidden_dim", max(64, model_dim * 2))))
     encoder_layers = max(1, int(o4_block.get("encoder_layers", 2)))
