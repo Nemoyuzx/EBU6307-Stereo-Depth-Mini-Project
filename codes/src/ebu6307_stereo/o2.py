@@ -484,12 +484,20 @@ def run(
         )
         transformed_gray = cv2.cvtColor(transformed_bgr, cv2.COLOR_BGR2GRAY)
 
-        # 这一步在 OpenCV 内部顺序完成 SIFT 的前 4 个标准步骤：
-        # 第 1 步在尺度空间和 DoG 金字塔中找极值候选点；
-        # 第 2 步剔除低对比度点和边缘响应点并做精定位；
-        # 第 3 步为关键点分配主方向；
-        # 第 4 步围绕关键点统计梯度直方图，输出 128 维描述符。
+        # 在整张 original_gray 上执行一次完整 SIFT；第二个参数传 None，表示不额外提供 mask，
+        # 所以 OpenCV 会直接在整幅图像内完成检测和描述。
+        # 返回的 original_keypoints 是“已经走完 SIFT 前 3 步”的结果：
+        # 1) 先在 original_gray 的尺度空间 / DoG 金字塔里找极值候选点；
+        # 2) 再结合 create_sift_detector(...) 里设定的 contrastThreshold 做低对比度剔除，
+        #    同时过滤边缘响应并完成亚像素级精定位；
+        # 3) 然后给每个保留下来的关键点分配主方向，因此 keypoint 的 pt / size / angle
+        #    在这里都已经是可直接使用的稳定属性。
+        # 返回的 original_descriptors 则对应 SIFT 第 4 步：围绕每个 original_keypoints 统计局部梯度，
+        # 为每个关键点生成一个 128 维描述符，供后面的 BFMatcher 做匹配。
         original_keypoints, original_descriptors = detector.detectAndCompute(original_gray, None)
+        # 对变换后的 transformed_gray 重复同一套 detect + compute 流程，得到另一组
+        # transformed_keypoints / transformed_descriptors；下面的 repeatability 评估
+        # 就是专门比较这两次 detectAndCompute(...) 的输出是否还能对应上。
         transformed_keypoints, transformed_descriptors = detector.detectAndCompute(transformed_gray, None)
 
         raw_matches = 0
