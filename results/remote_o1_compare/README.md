@@ -45,3 +45,9 @@
 - 这份 README 只用于记录提升结果，不改变主线提交路径。
 - 当前主线 O1 已恢复为原始 shift baseline。
 - 特殊算法后续若继续研究，应通过独立文件维护，而不是继续混入主线 O1。
+
+## 当前本地 results 收口确认（2026-03-31）
+- 标准 O1 提交产物仍保留在 `results/O1a_synthetic_data`、`results/O1b_synthetic_data`、`results/O1c_synthetic_data`。
+- 本地核对到 `results/O1a_synthetic_data/syn_pipeline.jpg`、`results/O1c_synthetic_data/SSIM.csv` 仍在；`results/O1b_synthetic_data/` 下各场景输出目录仍独立存在。
+- O1 新思路/实验性对比结果单独放在 `results/remote_o1_compare`，当前包含本 README 与 `SSIM_shift_baseline.csv`。
+- 结论：本地标准 results 没有被 O1 新思路覆盖；实验结果是独立保存的。

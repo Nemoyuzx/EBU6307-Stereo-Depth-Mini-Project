@@ -7,7 +7,6 @@ from pathlib import Path
 
 from . import o1, o2, o3, o4
 from .config import load_config
-from .o4_dinov2 import resolve_dinov2_checkpoint_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -100,6 +99,8 @@ def main() -> int:
         or args.o4_dinov2_repo is not None
         or args.o4_regression_mode is not None
     ):
+        from .o4_dinov2 import resolve_dinov2_checkpoint_path
+
         dinov2_model_name = args.o4_dinov2_model or config.o4.dinov2_model_name
         dinov2_checkpoint_path = (
             args.o4_dinov2_checkpoint

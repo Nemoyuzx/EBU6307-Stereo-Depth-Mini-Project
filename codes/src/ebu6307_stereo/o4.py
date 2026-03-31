@@ -18,10 +18,6 @@ from .common import (
     write_scene_text,
 )
 from .config import O3Config, O4Config
-from .o4_dinov2 import (
-    extract_dinov2_descriptors,
-    resolve_o4_execution_mode,
-)
 from .o3 import (
     average_pool_2d,
     average_pool_gray,
@@ -589,13 +585,24 @@ def run(
     scenes = filter_scene_dirs(discovered_scenes, scene_name)
     scene_fold_map = {scene.name: index % config.num_folds for index, scene in enumerate(discovered_scenes)}
     backend_status = resolve_torch_backend(config.backend, config.device, config.prefer_cuda)
-    execution_status = resolve_o4_execution_mode(
-        config.execution_mode,
-        backend_status.use_torch,
-        config.dinov2_model_name,
-        config.dinov2_repo_path,
-        config.dinov2_checkpoint_path,
-    )
+    if str(config.execution_mode).strip().lower() == "dinov2_cost_volume":
+        from .o4_dinov2 import resolve_o4_execution_mode
+
+        execution_status = resolve_o4_execution_mode(
+            config.execution_mode,
+            backend_status.use_torch,
+            config.dinov2_model_name,
+            config.dinov2_repo_path,
+            config.dinov2_checkpoint_path,
+        )
+    else:
+        execution_status = type("O4ExecutionModeStatus", (), {
+            "requested_mode": "baseline",
+            "selected_mode": "baseline",
+            "descriptor_source": "handcrafted_patch_tokens",
+            "available": True,
+            "reason": "using the existing trainable token projection baseline",
+        })()
 
     if max_scenes is not None:
         if max_scenes < 0:
@@ -678,6 +685,8 @@ def run(
         left_gray = load_gray(scene_dir / "im0.png")
         right_gray = load_gray(scene_dir / "im1.png")
         if execution_status.selected_mode == "dinov2_cost_volume":
+            from .o4_dinov2 import extract_dinov2_descriptors
+
             try:
                 left_descriptors, _, _, model_patch_size = extract_dinov2_descriptors(
                     left_gray,
