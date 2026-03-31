@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import shutil
 import sys
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -12,10 +11,6 @@ import numpy as np
 from .common import discover_scenes, ensure_parent, filter_scene_dirs, load_rgb
 from .config import O1Config
 from .pfm import write_pfm
-
-
-MetricValue = str | float | int
-MetricRow = dict[str, MetricValue]
 
 
 def synthesize_shift(image: Any, shift_pixels: int) -> Any:
@@ -51,406 +46,10 @@ def synthesize_disparity(height: int, width: int, shift_pixels: int) -> Any:
     return disparity
 
 
-def resolve_torch_device(device: str) -> tuple[Any | None, str, bool]:
-    """解析 O1 设备选择；当 torch 不可用时回退到 CPU，并返回是否实际用上 CUDA。"""
-
-    normalized = (device or "auto").strip().lower()
-    if normalized not in {"auto", "cuda", "cpu"}:
-        raise ValueError(f"Unsupported O1 device: {device}")
-
-    try:
-        import torch
-    except Exception:
-        return None, "cpu(no-torch)", False
-
-    if normalized == "cpu":
-        return torch.device("cpu"), "cpu", False
-    if normalized == "cuda":
-        if not torch.cuda.is_available():
-            raise RuntimeError("O1 device was forced to CUDA, but torch.cuda.is_available() is False.")
-        return torch.device("cuda"), f"cuda:{torch.cuda.current_device()}", True
-
-    if torch.cuda.is_available():
-        return torch.device("cuda"), f"cuda:{torch.cuda.current_device()}", True
-    return torch.device("cpu"), "cpu", False
-
-
-def _torch_kmeans(features: Any, num_clusters: int, max_iters: int = 25, seed: int = 42) -> Any:
-    """使用 torch 在当前 device 上执行简化版 K-Means。"""
-
-    import torch
-
-    if features.ndim != 2:
-        raise ValueError(f"Expected features with shape NxD, got {tuple(features.shape)}")
-
-    num_samples = int(features.shape[0])
-    if num_samples == 0:
-        raise RuntimeError("K-Means received zero samples.")
-
-    actual_clusters = max(1, min(int(num_clusters), num_samples))
-    generator = torch.Generator(device=features.device)
-    generator.manual_seed(seed)
-    initial_indices = torch.randperm(num_samples, generator=generator, device=features.device)[:actual_clusters]
-    centroids = features[initial_indices].clone()
-    assignments = torch.zeros(num_samples, dtype=torch.long, device=features.device)
-
-    for _ in range(max_iters):
-        distances = torch.cdist(features, centroids)
-        new_assignments = torch.argmin(distances, dim=1)
-        if torch.equal(new_assignments, assignments):
-            break
-        assignments = new_assignments
-
-        new_centroids = torch.zeros_like(centroids)
-        counts = torch.bincount(assignments, minlength=actual_clusters).to(features.dtype)
-        new_centroids.index_add_(0, assignments, features)
-        nonzero = counts > 0
-        if torch.any(nonzero):
-            new_centroids[nonzero] = new_centroids[nonzero] / counts[nonzero].unsqueeze(1)
-        if torch.any(~nonzero):
-            replacement_indices = torch.randperm(num_samples, generator=generator, device=features.device)[: int((~nonzero).sum().item())]
-            new_centroids[~nonzero] = features[replacement_indices]
-        centroids = new_centroids
-
-    distances = torch.cdist(features, centroids)
-    assignments = torch.argmin(distances, dim=1)
-    return assignments
-
-
-def superpixel_clustering_depth(
-    image: Any,
-    num_superpixels: int = 400,
-    num_clusters: int = 12,
-    device: str = "auto",
-) -> tuple[Any, dict[str, Any]]:
-    """使用 SLIC 超像素和 K-Means 做粗粒度区域划分，并生成启发式深度图。
-
-    GPU/CPU 说明：
-    - SLIC 超像素依赖 OpenCV ximgproc，目前仍在 CPU 上执行。
-    - 超像素特征聚合、K-Means 聚类、深度图回填、平滑改为 torch 张量实现，可在 CUDA 上加速。
-    - 若 torch/CUDA 不可用，则自动回退到 CPU torch / NumPy 路径。
-
-    速度说明：
-    - 为了让正式 24 场景可在远端稳定跑完，这里只对“超像素深度估计”使用内部工作分辨率；
-      原始图像不会被改写，最终 DIBR 仍在原分辨率上执行。
-    """
-
-    import cv2
-
-    rgb_image = np.asarray(image, dtype=np.uint8)
-    if rgb_image.ndim != 3 or rgb_image.shape[2] != 3:
-        raise ValueError(f"Expected an RGB image with shape HxWx3, got {rgb_image.shape}")
-
-    ximgproc = getattr(cv2, "ximgproc", None)
-    if ximgproc is None or not hasattr(ximgproc, "createSuperpixelSLIC"):
-        raise RuntimeError("OpenCV ximgproc is unavailable. Install opencv-contrib-python to use superpixel clustering.")
-
-    height, width = rgb_image.shape[:2]
-    max_working_side = 512
-    scale = min(1.0, float(max_working_side) / float(max(height, width)))
-    if scale < 1.0:
-        work_width = max(64, int(round(width * scale)))
-        work_height = max(64, int(round(height * scale)))
-        work_image = cv2.resize(rgb_image, (work_width, work_height), interpolation=cv2.INTER_AREA)
-    else:
-        work_image = rgb_image
-        work_height, work_width = height, width
-
-    region_size = max(1, int(np.sqrt((work_height * work_width) / max(1, num_superpixels))))
-    lab_img = cv2.cvtColor(work_image, cv2.COLOR_RGB2LAB)
-    slic = ximgproc.createSuperpixelSLIC(
-        lab_img,
-        algorithm=ximgproc.MSLIC,
-        region_size=region_size,
-        ruler=10.0,
-    )
-    slic.iterate(10)
-    slic.enforceLabelConnectivity(10)
-
-    labels = slic.getLabels().astype(np.int64)
-    num_labels = int(slic.getNumberOfSuperpixels())
-    if num_labels <= 0:
-        raise RuntimeError("SLIC failed to produce any superpixels.")
-
-    torch_device, resolved_device, using_cuda = resolve_torch_device(device)
-    if torch_device is None:
-        # 没有 torch 时，保留原始 CPU 方案作为最终兜底。
-        from sklearn.cluster import KMeans
-
-        features: list[list[float]] = []
-        centroids_y: list[int] = []
-        for label_index in range(num_labels):
-            mask = (labels == label_index).astype(np.uint8)
-            if np.count_nonzero(mask) == 0:
-                features.append([0.0, 0.0, 0.0, 0.0])
-                centroids_y.append(0)
-                continue
-            mean_color = cv2.mean(lab_img, mask=mask)[:3]
-            moments = cv2.moments(mask, binaryImage=True)
-            centroid_y = int(moments["m01"] / moments["m00"]) if moments["m00"] != 0 else 0
-            normalized_y = (centroid_y / max(1, work_height)) * 100.0
-            features.append([float(mean_color[0]), float(mean_color[1]), float(mean_color[2]), float(normalized_y)])
-            centroids_y.append(centroid_y)
-
-        actual_clusters = max(1, min(int(num_clusters), num_labels))
-        cluster_labels = KMeans(n_clusters=actual_clusters, random_state=42, n_init=10).fit_predict(
-            np.asarray(features, dtype=np.float32)
-        )
-        cluster_depths = np.zeros(actual_clusters, dtype=np.float32)
-        for cluster_index in range(actual_clusters):
-            y_coords = [centroids_y[i] for i in range(num_labels) if int(cluster_labels[i]) == cluster_index]
-            if y_coords:
-                cluster_depths[cluster_index] = float((np.mean(y_coords) / max(1, work_height)) * 255.0)
-        depth_map = np.zeros((work_height, work_width), dtype=np.uint8)
-        for label_index in range(num_labels):
-            depth_map[labels == label_index] = int(np.clip(cluster_depths[int(cluster_labels[label_index])], 0.0, 255.0))
-        depth_map = cv2.bilateralFilter(depth_map, d=15, sigmaColor=80, sigmaSpace=80)
-        if depth_map.shape != (height, width):
-            depth_map = cv2.resize(depth_map, (width, height), interpolation=cv2.INTER_LINEAR)
-        return depth_map, {
-            "device": resolved_device,
-            "using_cuda": using_cuda,
-            "superpixels": num_labels,
-            "working_resolution": f"{work_width}x{work_height}",
-            "gpu_steps": [],
-            "cpu_steps": ["SLIC superpixel segmentation", "feature aggregation", "K-Means clustering", "depth smoothing"],
-        }
-
-    import torch
-    import torch.nn.functional as F
-
-    labels_t = torch.from_numpy(labels.reshape(-1)).to(device=torch_device, dtype=torch.long)
-    lab_t = torch.from_numpy(lab_img.reshape(-1, 3).astype(np.float32)).to(torch_device)
-
-    y_coords = torch.arange(work_height, device=torch_device, dtype=torch.float32).unsqueeze(1).expand(work_height, work_width).reshape(-1)
-
-    counts = torch.bincount(labels_t, minlength=num_labels).clamp_min(1).to(torch.float32)
-    color_sums = torch.zeros((num_labels, 3), dtype=torch.float32, device=torch_device)
-    color_sums.index_add_(0, labels_t, lab_t)
-    mean_colors = color_sums / counts.unsqueeze(1)
-
-    y_sums = torch.zeros(num_labels, dtype=torch.float32, device=torch_device)
-    y_sums.index_add_(0, labels_t, y_coords)
-    mean_y = y_sums / counts
-    normalized_y = (mean_y / max(1, work_height)) * 100.0
-    features = torch.cat((mean_colors, normalized_y.unsqueeze(1)), dim=1)
-
-    cluster_labels = _torch_kmeans(features, num_clusters=num_clusters)
-    actual_clusters = max(1, min(int(num_clusters), num_labels))
-
-    cluster_depth_sums = torch.zeros(actual_clusters, dtype=torch.float32, device=torch_device)
-    cluster_depth_sums.index_add_(0, cluster_labels, mean_y)
-    cluster_counts = torch.bincount(cluster_labels, minlength=actual_clusters).clamp_min(1).to(torch.float32)
-    cluster_depths = (cluster_depth_sums / cluster_counts) / max(1, work_height) * 255.0
-
-    label_depths = cluster_depths[cluster_labels]
-    depth_flat = label_depths[labels_t]
-    depth_map_t = depth_flat.reshape(work_height, work_width).clamp(0.0, 255.0)
-
-    # 这里用高斯平滑近似原 bilateral 的温和平滑，保持主体思路不变，同时可在 GPU 上执行。
-    kernel_size = 9
-    sigma = 2.0
-    coords = torch.arange(kernel_size, device=torch_device, dtype=torch.float32) - (kernel_size - 1) / 2.0
-    kernel_1d = torch.exp(-(coords**2) / (2.0 * sigma * sigma))
-    kernel_1d = kernel_1d / kernel_1d.sum()
-    kernel_2d = torch.outer(kernel_1d, kernel_1d).reshape(1, 1, kernel_size, kernel_size)
-    depth_map_t = F.conv2d(
-        depth_map_t.unsqueeze(0).unsqueeze(0),
-        kernel_2d,
-        padding=kernel_size // 2,
-    ).squeeze(0).squeeze(0)
-
-    depth_map = depth_map_t.round().clamp(0.0, 255.0).to(torch.uint8).detach().cpu().numpy()
-    if depth_map.shape != (height, width):
-        depth_map = cv2.resize(depth_map, (width, height), interpolation=cv2.INTER_LINEAR)
-    return depth_map, {
-        "device": resolved_device,
-        "using_cuda": using_cuda,
-        "superpixels": num_labels,
-        "working_resolution": f"{work_width}x{work_height}",
-        "gpu_steps": [
-            "superpixel feature aggregation",
-            "K-Means clustering",
-            "depth map back-fill",
-            "Gaussian depth smoothing",
-        ] if using_cuda else [],
-        "cpu_steps": ["SLIC superpixel segmentation"] + ([] if using_cuda else ["torch feature aggregation", "torch K-Means clustering", "torch depth smoothing"]),
-    }
-
-
-def generate_stereo_dibr(image: Any, depth_map: Any, baseline_shift: int = 20, device: str = "auto") -> tuple[Any, Any, dict[str, Any]]:
-    """根据启发式深度图做简单 DIBR 投影，并修补投影空洞。
-
-    GPU/CPU 说明：
-    - 投影散射、空洞检测、邻域扩散修补尽量在 torch 上执行，可落到 CUDA。
-    - 若无 torch，则使用原始 CPU NumPy + OpenCV inpaint 兜底。
-    """
-
-    rgb_image = np.asarray(image, dtype=np.uint8)
-    depth = np.asarray(depth_map, dtype=np.uint8)
-    if rgb_image.ndim != 3 or rgb_image.shape[2] != 3:
-        raise ValueError(f"Expected an RGB image with shape HxWx3, got {rgb_image.shape}")
-    if depth.shape != rgb_image.shape[:2]:
-        raise ValueError(f"Depth map shape {depth.shape} does not match image shape {rgb_image.shape[:2]}")
-
-    height, width, _ = rgb_image.shape
-    if baseline_shift == 0:
-        info = {"device": "cpu", "using_cuda": False, "gpu_steps": [], "cpu_steps": ["identity copy"]}
-        return rgb_image.copy(), rgb_image.copy(), info
-
-    torch_device, resolved_device, using_cuda = resolve_torch_device(device)
-    if torch_device is None:
-        import cv2
-
-        left_img = np.zeros_like(rgb_image)
-        right_img = np.zeros_like(rgb_image)
-        left_mask = np.full((height, width), 255, dtype=np.uint8)
-        right_mask = np.full((height, width), 255, dtype=np.uint8)
-
-        y_coords, x_coords = np.indices((height, width))
-        x_flat = x_coords.reshape(-1)
-        y_flat = y_coords.reshape(-1)
-        depth_flat = depth.reshape(-1)
-        colors_flat = rgb_image.reshape(-1, 3)
-
-        sort_index = np.argsort(depth_flat, kind="stable")
-        x_sorted = x_flat[sort_index]
-        y_sorted = y_flat[sort_index]
-        depth_sorted = depth_flat[sort_index]
-        colors_sorted = colors_flat[sort_index]
-        disparity = ((depth_sorted.astype(np.float32) / 255.0) * abs(baseline_shift)).astype(np.int32)
-
-        x_left = np.clip(x_sorted + disparity, 0, width - 1)
-        x_right = np.clip(x_sorted - disparity, 0, width - 1)
-
-        left_img[y_sorted, x_left] = colors_sorted
-        right_img[y_sorted, x_right] = colors_sorted
-        left_mask[y_sorted, x_left] = 0
-        right_mask[y_sorted, x_right] = 0
-
-        left_inpainted = cv2.inpaint(left_img, left_mask, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
-        right_inpainted = cv2.inpaint(right_img, right_mask, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
-        return left_inpainted, right_inpainted, {
-            "device": resolved_device,
-            "using_cuda": using_cuda,
-            "gpu_steps": [],
-            "cpu_steps": ["DIBR projection", "OpenCV inpaint"],
-        }
-
-    import torch
-
-    rgb_t = torch.from_numpy(rgb_image.astype(np.float32)).to(torch_device)
-    depth_t = torch.from_numpy(depth.astype(np.float32)).to(torch_device)
-    disparity = torch.round((depth_t / 255.0) * float(abs(baseline_shift))).to(torch.long)
-
-    y_coords = torch.arange(height, device=torch_device, dtype=torch.long).unsqueeze(1).expand(height, width)
-    x_coords = torch.arange(width, device=torch_device, dtype=torch.long).unsqueeze(0).expand(height, width)
-
-    def _scatter(target_x: Any) -> tuple[Any, Any]:
-        target_x = target_x.clamp(0, width - 1)
-        linear_idx = (y_coords * width + target_x).reshape(-1)
-        depth_flat = depth_t.reshape(-1)
-        color_flat = rgb_t.reshape(-1, 3)
-        sort_index = torch.argsort(depth_flat, stable=True)
-        linear_idx = linear_idx[sort_index]
-        depth_sorted = depth_flat[sort_index]
-        color_sorted = color_flat[sort_index]
-
-        canvas = torch.zeros((height * width, 3), dtype=torch.float32, device=torch_device)
-        mask = torch.zeros(height * width, dtype=torch.bool, device=torch_device)
-        canvas[linear_idx] = color_sorted
-        mask[linear_idx] = True
-        return canvas.reshape(height, width, 3), mask.reshape(height, width)
-
-    left_img_t, left_mask_t = _scatter(x_coords + disparity)
-    right_img_t, right_mask_t = _scatter(x_coords - disparity)
-
-    def _fill_holes(view: Any, valid_mask: Any, passes: int = 6) -> Any:
-        filled = view.clone()
-        known = valid_mask.unsqueeze(-1)
-        for _ in range(passes):
-            if bool(valid_mask.all()):
-                break
-            neighbour_sum = torch.zeros_like(filled)
-            neighbour_count = torch.zeros((height, width, 1), dtype=torch.float32, device=torch_device)
-            for dy, dx in ((0, -1), (0, 1), (-1, 0), (1, 0)):
-                shifted = torch.roll(filled, shifts=(dy, dx), dims=(0, 1))
-                shifted_mask = torch.roll(valid_mask, shifts=(dy, dx), dims=(0, 1)).unsqueeze(-1)
-                if dy == -1:
-                    shifted[-1, :, :] = 0
-                    shifted_mask[-1, :, :] = False
-                elif dy == 1:
-                    shifted[0, :, :] = 0
-                    shifted_mask[0, :, :] = False
-                if dx == -1:
-                    shifted[:, -1, :] = 0
-                    shifted_mask[:, -1, :] = False
-                elif dx == 1:
-                    shifted[:, 0, :] = 0
-                    shifted_mask[:, 0, :] = False
-                neighbour_sum += shifted * shifted_mask
-                neighbour_count += shifted_mask.to(torch.float32)
-            hole_mask = (~valid_mask).unsqueeze(-1)
-            update_mask = hole_mask & (neighbour_count > 0)
-            averaged = neighbour_sum / neighbour_count.clamp_min(1.0)
-            filled = torch.where(update_mask, averaged, filled)
-            valid_mask = valid_mask | update_mask.squeeze(-1)
-        return filled
-
-    left_filled = _fill_holes(left_img_t, left_mask_t)
-    right_filled = _fill_holes(right_img_t, right_mask_t)
-    left_img = left_filled.clamp(0.0, 255.0).round().to(torch.uint8).detach().cpu().numpy()
-    right_img = right_filled.clamp(0.0, 255.0).round().to(torch.uint8).detach().cpu().numpy()
-    return left_img, right_img, {
-        "device": resolved_device,
-        "using_cuda": using_cuda,
-        "gpu_steps": ["DIBR projection scatter", "hole mask construction", "iterative hole filling"] if using_cuda else [],
-        "cpu_steps": [] if using_cuda else ["torch DIBR projection", "torch hole filling"],
-    }
-
-
-def synthesize_superpixel_stereo(
-    image: Any,
-    shift_pixels: int,
-    num_superpixels: int = 400,
-    num_clusters: int = 12,
-    device: str = "auto",
-) -> tuple[Any, Any, dict[str, Any]]:
-    """基于超像素和颜色聚类生成启发式深度，再合成一对虚拟立体图。"""
-
-    if shift_pixels == 0:
-        height, width = image.shape[:2]
-        return np.asarray(image, dtype=np.uint8).copy(), np.zeros((height, width), dtype=np.float32), {
-            "method": "superpixel_kmeans",
-            "device": "cpu",
-            "using_cuda": False,
-            "gpu_steps": [],
-            "cpu_steps": ["identity copy"],
-            "superpixels": 0,
-        }
-
-    depth_map, depth_info = superpixel_clustering_depth(
-        image,
-        num_superpixels=num_superpixels,
-        num_clusters=num_clusters,
-        device=device,
-    )
-    left_view, right_view, dibr_info = generate_stereo_dibr(image, depth_map, baseline_shift=abs(shift_pixels), device=device)
-    synthetic = right_view if shift_pixels >= 0 else left_view
-    disparity = (depth_map.astype(np.float32) / 255.0) * float(abs(shift_pixels))
-    return synthetic, disparity, {
-        "method": "superpixel_kmeans",
-        "device": depth_info["device"] if depth_info.get("using_cuda") else dibr_info["device"],
-        "using_cuda": bool(depth_info.get("using_cuda") or dibr_info.get("using_cuda")),
-        "gpu_steps": depth_info.get("gpu_steps", []) + dibr_info.get("gpu_steps", []),
-        "cpu_steps": depth_info.get("cpu_steps", []) + dibr_info.get("cpu_steps", []),
-        "superpixels": depth_info.get("superpixels", 0),
-    }
-
-
 def compute_ssim(left_image: Any, synthetic_image: Any) -> float:
     """手工实现一个简化版多通道 SSIM，用于衡量原始左图和合成右图的结构相似性。"""
 
+    # 这里保留局部导入：SciPy 只在真正计算 SSIM 时才需要，避免仅做 dry-run/导入检查时强依赖该可选库。
     from scipy.ndimage import gaussian_filter
 
     left = np.asarray(left_image, dtype=np.float64)
@@ -489,7 +88,7 @@ def compute_ssim(left_image: Any, synthetic_image: Any) -> float:
     return float(np.mean(channel_scores))
 
 
-def read_metrics(metrics_file: Path) -> list[MetricRow]:
+def read_metrics(metrics_file: Path) -> list[dict[str, str]]:
     """读取历史 SSIM 指标，便于增量更新同一个 CSV。"""
     if not metrics_file.exists():
         return []
@@ -497,14 +96,7 @@ def read_metrics(metrics_file: Path) -> list[MetricRow]:
     with metrics_file.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         return [
-            {
-                "scene": row.get("scene", ""),
-                "shift_pixels": row.get("shift_pixels", ""),
-                "ssim": row.get("ssim", ""),
-                "method": row.get("method", ""),
-                "device": row.get("device", ""),
-                "used_gpu": row.get("used_gpu", ""),
-            }
+            {"scene": row.get("scene", ""), "shift_pixels": row.get("shift_pixels", ""), "ssim": row.get("ssim", "")}
             for row in reader
             if row.get("scene")
         ]
@@ -519,66 +111,37 @@ def copy_if_exists(source: Path, destination: Path) -> bool:
     return True
 
 
-def write_metrics(metrics_file: Path, rows: list[MetricRow]) -> None:
-    """按 scene+method 合并新旧 SSIM 指标，避免重复追加同一组合。"""
+def write_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) -> None:
+    """按 scene 合并新旧 SSIM 指标，避免重复追加同一场景。"""
     existing_rows = read_metrics(metrics_file)
-    rows_by_key = {(str(row["scene"]), str(row.get("method", ""))): row for row in rows}
-    merged_rows: list[MetricRow] = []
+    rows_by_scene = {str(row["scene"]): row for row in rows}
+    merged_rows: list[dict[str, str | float | int]] = []
 
     for row in existing_rows:
-        key = (str(row["scene"]), str(row.get("method", "")))
-        replacement = rows_by_key.pop(key, None)
+        scene_name = row["scene"]
+        replacement = rows_by_scene.pop(scene_name, None)
         merged_rows.append(replacement if replacement is not None else row)
 
-    merged_rows.extend(rows_by_key.values())
+    merged_rows.extend(rows_by_scene.values())
 
     ensure_parent(metrics_file)
     with metrics_file.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["scene", "shift_pixels", "ssim", "method", "device", "used_gpu"])
+        writer = csv.DictWriter(handle, fieldnames=["scene", "shift_pixels", "ssim"])
         writer.writeheader()
         writer.writerows(merged_rows)
 
 
-def build_output_paths(config: O1Config) -> tuple[Path, Path]:
-    synthetic_dir = config.synthetic_dir
-    metrics_file = config.metrics_file
-    tag = (config.output_tag or "").strip()
-    if not tag:
-        return synthetic_dir, metrics_file
-
-    synthetic_dir = synthetic_dir.with_name(f"{synthetic_dir.name}_{tag}")
-    metrics_file = metrics_file.with_name(f"{metrics_file.stem}_{tag}{metrics_file.suffix}")
-    return synthetic_dir, metrics_file
-
-
-def write_scene_metadata(
-    scene_output_dir: Path,
-    scene_name: str,
-    shift_pixels: int,
-    calib_copied: bool,
-    synthesis_method: str,
-    runtime_info: dict[str, Any],
-) -> None:
+def write_scene_metadata(scene_output_dir: Path, scene_name: str, shift_pixels: int, calib_copied: bool) -> None:
     """为每个合成场景生成 README，说明文件来源与参数。"""
     metadata_path = scene_output_dir / "README.txt"
-    gpu_steps = runtime_info.get("gpu_steps", [])
-    cpu_steps = runtime_info.get("cpu_steps", [])
     metadata_path.write_text(
         "\n".join(
             [
                 f"scene: {scene_name}",
-                f"generator: O1 ({synthesis_method})",
+                "generator: minimal O1 baseline",
                 "im0.png: original left image copied from the source scene",
-                (
-                    "im1.png: synthetic right image created by horizontal shift"
-                    if synthesis_method == "shift"
-                    else "im1.png: synthetic right image created by superpixel depth estimation + K-Means + DIBR"
-                ),
+                "im1.png: synthetic right image created by horizontal shift",
                 f"shift_pixels: {shift_pixels}",
-                f"device: {runtime_info.get('device', 'cpu')}",
-                f"used_gpu: {'yes' if runtime_info.get('using_cuda') else 'no'}",
-                f"gpu_steps: {', '.join(gpu_steps) if gpu_steps else 'none'}",
-                f"cpu_steps: {', '.join(cpu_steps) if cpu_steps else 'none'}",
                 f"calib.txt: {'copied' if calib_copied else 'missing in source scene'}",
             ]
         )
@@ -657,18 +220,12 @@ def run(config: O1Config, max_scenes: int | None, dry_run: bool, scene_name: str
             return 2
         scenes = scenes[:max_scenes]
 
-    output_synthetic_dir, output_metrics_file = build_output_paths(config)
-
     print(f"Repository root: {config.repo_root}")
     print(f"Middlebury root: {config.middlebury_root}")
     print(f"Discovered scenes with im0.png/im1.png: {discovered_count}")
     if scene_name is not None:
         print(f"Scene filter: {scene_name}")
     print("Scenes to process: " + ", ".join(scene.name for scene in scenes) if scenes else "Scenes to process: none")
-    print(f"O1 synthesis method: {config.method}")
-    print(f"O1 device preference: {config.device}")
-    print(f"O1 synthetic output dir: {output_synthetic_dir}")
-    print(f"O1 metrics file: {output_metrics_file}")
 
     if not config.middlebury_root.exists():
         if dry_run or max_scenes == 0:
@@ -700,36 +257,16 @@ def run(config: O1Config, max_scenes: int | None, dry_run: bool, scene_name: str
         print("Dry run requested; no outputs were written.")
         return 0
 
-    if config.method not in {"shift", "superpixel_kmeans"}:
-        raise ValueError(f"Unsupported O1 method: {config.method}")
-
+    # 这里保留局部导入：Pillow 只在真正写出 im1.png 时需要，避免 CLI 仅导入模块时就要求安装该可选依赖。
     from PIL import Image
 
-    output_synthetic_dir.mkdir(parents=True, exist_ok=True)
-    metric_rows: list[MetricRow] = []
+    config.synthetic_dir.mkdir(parents=True, exist_ok=True)
+    metric_rows: list[dict[str, str | float | int]] = []
     for scene_dir in scenes:
         left = load_rgb(scene_dir / "im0.png")
-        if config.method == "shift":
-            synthetic = synthesize_shift(left, config.shift_pixels)
-            disparity = synthesize_disparity(left.shape[0], left.shape[1], config.shift_pixels)
-            runtime_info = {
-                "method": "shift",
-                "device": "cpu",
-                "using_cuda": False,
-                "gpu_steps": [],
-                "cpu_steps": ["horizontal image shift", "constant disparity generation"],
-                "superpixels": 0,
-            }
-        else:
-            synthetic, disparity, runtime_info = synthesize_superpixel_stereo(
-                left,
-                config.shift_pixels,
-                num_superpixels=config.superpixel_count,
-                num_clusters=config.superpixel_cluster_count,
-                device=config.device,
-            )
-
-        scene_output_dir = output_synthetic_dir / scene_dir.name
+        synthetic = synthesize_shift(left, config.shift_pixels)
+        disparity = synthesize_disparity(left.shape[0], left.shape[1], config.shift_pixels)
+        scene_output_dir = config.synthetic_dir / scene_dir.name
         scene_output_dir.mkdir(parents=True, exist_ok=True)
 
         copy_if_exists(scene_dir / "im0.png", scene_output_dir / "im0.png")
@@ -737,23 +274,10 @@ def run(config: O1Config, max_scenes: int | None, dry_run: bool, scene_name: str
         write_pfm(scene_output_dir / "disp0.pfm", disparity)
 
         calib_copied = copy_if_exists(scene_dir / "calib.txt", scene_output_dir / "calib.txt")
-        write_scene_metadata(scene_output_dir, scene_dir.name, config.shift_pixels, calib_copied, config.method, runtime_info)
-        ssim_value = compute_ssim(left, synthetic)
-        metric_rows.append(
-            {
-                "scene": scene_dir.name,
-                "shift_pixels": config.shift_pixels,
-                "ssim": f"{ssim_value:.6f}",
-                "method": config.method,
-                "device": runtime_info.get("device", "cpu"),
-                "used_gpu": "yes" if runtime_info.get("using_cuda") else "no",
-            }
-        )
-        print(
-            f"Wrote synthetic scene: {scene_output_dir} "
-            f"(ssim={ssim_value:.6f}, device={runtime_info.get('device', 'cpu')}, used_gpu={'yes' if runtime_info.get('using_cuda') else 'no'})"
-        )
+        write_scene_metadata(scene_output_dir, scene_dir.name, config.shift_pixels, calib_copied)
+        metric_rows.append({"scene": scene_dir.name, "shift_pixels": config.shift_pixels, "ssim": f"{compute_ssim(left, synthetic):.6f}"})
+        print(f"Wrote synthetic scene: {scene_output_dir} (calib.txt copied: {'yes' if calib_copied else 'no'})")
 
-    write_metrics(output_metrics_file, metric_rows)
-    print(f"Wrote SSIM summary: {output_metrics_file}")
+    write_metrics(config.metrics_file, metric_rows)
+    print(f"Wrote SSIM summary: {config.metrics_file}")
     return 0

@@ -5,6 +5,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+from . import o1, o2, o3, o4
 from .config import load_config
 from .o4_dinov2 import resolve_dinov2_checkpoint_path
 
@@ -52,35 +53,6 @@ def parse_args() -> argparse.Namespace:
         help="Validate the configured output directory for the selected objective without modifying any files.",
     )
     parser.add_argument(
-        "--o1-method",
-        choices=("shift", "superpixel_kmeans"),
-        default=None,
-        help="Override the O1 synthesis method.",
-    )
-    parser.add_argument(
-        "--o1-superpixel-count",
-        type=int,
-        default=None,
-        help="Override the O1 superpixel count when --o1-method superpixel_kmeans is used.",
-    )
-    parser.add_argument(
-        "--o1-superpixel-cluster-count",
-        type=int,
-        default=None,
-        help="Override the O1 K-Means cluster count when --o1-method superpixel_kmeans is used.",
-    )
-    parser.add_argument(
-        "--o1-device",
-        choices=("auto", "cuda", "cpu"),
-        default=None,
-        help="Override the O1 execution device preference.",
-    )
-    parser.add_argument(
-        "--o1-output-tag",
-        default=None,
-        help="Append a tag to the configured O1 output folder / SSIM CSV filename to avoid overwrite.",
-    )
-    parser.add_argument(
         "--o4-execution-mode",
         choices=("baseline", "dinov2_cost_volume"),
         default=None,
@@ -121,29 +93,6 @@ def main() -> int:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
 
-    if args.objective == "o1" and (
-        args.o1_method is not None
-        or args.o1_superpixel_count is not None
-        or args.o1_superpixel_cluster_count is not None
-        or args.o1_device is not None
-        or args.o1_output_tag is not None
-    ):
-        config = replace(
-            config,
-            o1=replace(
-                config.o1,
-                method=args.o1_method or config.o1.method,
-                superpixel_count=args.o1_superpixel_count if args.o1_superpixel_count is not None else config.o1.superpixel_count,
-                superpixel_cluster_count=(
-                    args.o1_superpixel_cluster_count
-                    if args.o1_superpixel_cluster_count is not None
-                    else config.o1.superpixel_cluster_count
-                ),
-                device=args.o1_device or config.o1.device,
-                output_tag=args.o1_output_tag if args.o1_output_tag is not None else config.o1.output_tag,
-            ),
-        )
-
     if args.objective == "o4" and (
         args.o4_execution_mode is not None
         or args.o4_dinov2_model is not None
@@ -175,8 +124,6 @@ def main() -> int:
 
     if args.validate_results:
         if args.objective == "o2":
-            from . import o2
-
             return o2.validate_results(
                 config.o2.keypoints_dir,
                 config.o2.matches_dir,
@@ -184,8 +131,6 @@ def main() -> int:
                 args.scene_name,
             )
         if args.objective == "o3":
-            from . import o3
-
             return o3.validate_results(
                 config.o3.disparity_dir,
                 config.o3.analysis_dir,
@@ -193,21 +138,15 @@ def main() -> int:
                 args.scene_name,
             )
         if args.objective == "o4":
-            from . import o4
-
             return o4.validate_results(
                 config.o4.disparity_dir,
                 config.o4.analysis_dir,
                 config.o4.metrics_file,
                 args.scene_name,
             )
-        from . import o1
-
         return o1.validate_results(config.o1.synthetic_dir, args.scene_name)
 
     if args.objective == "o2":
-        from . import o2
-
         return o2.run(
             config.repo_root,
             config.middlebury_root,
@@ -218,8 +157,6 @@ def main() -> int:
         )
 
     if args.objective == "o3":
-        from . import o3
-
         return o3.run(
             config.repo_root,
             config.middlebury_root,
@@ -230,8 +167,6 @@ def main() -> int:
         )
 
     if args.objective == "o4":
-        from . import o4
-
         return o4.run(
             config.repo_root,
             config.middlebury_root,
@@ -240,8 +175,6 @@ def main() -> int:
             args.dry_run,
             args.scene_name,
         )
-
-    from . import o1
 
     return o1.run(config.o1, args.max_scenes, args.dry_run, args.scene_name)
 
