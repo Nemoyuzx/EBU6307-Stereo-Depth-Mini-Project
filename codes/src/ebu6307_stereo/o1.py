@@ -129,6 +129,10 @@ def superpixel_clustering_depth(
     - SLIC 超像素依赖 OpenCV ximgproc，目前仍在 CPU 上执行。
     - 超像素特征聚合、K-Means 聚类、深度图回填、平滑改为 torch 张量实现，可在 CUDA 上加速。
     - 若 torch/CUDA 不可用，则自动回退到 CPU torch / NumPy 路径。
+
+    速度说明：
+    - 为了让正式 24 场景可在远端稳定跑完，这里只对“超像素深度估计”使用内部工作分辨率；
+      原始图像不会被改写，最终 DIBR 仍在原分辨率上执行。
     """
 
     import cv2
@@ -142,8 +146,18 @@ def superpixel_clustering_depth(
         raise RuntimeError("OpenCV ximgproc is unavailable. Install opencv-contrib-python to use superpixel clustering.")
 
     height, width = rgb_image.shape[:2]
-    region_size = max(1, int(np.sqrt((height * width) / max(1, num_superpixels))))
-    lab_img = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2LAB)
+    max_working_side = 512
+    scale = min(1.0, float(max_working_side) / float(max(height, width)))
+    if scale < 1.0:
+        work_width = max(64, int(round(width * scale)))
+        work_height = max(64, int(round(height * scale)))
+        work_image = cv2.resize(rgb_image, (work_width, work_height), interpolation=cv2.INTER_AREA)
+    else:
+        work_image = rgb_image
+        work_height, work_width = height, width
+
+    region_size = max(1, int(np.sqrt((work_height * work_width) / max(1, num_superpixels))))
+    lab_img = cv2.cvtColor(work_image, cv2.COLOR_RGB2LAB)
     slic = ximgproc.createSuperpixelSLIC(
         lab_img,
         algorithm=ximgproc.MSLIC,
@@ -174,7 +188,7 @@ def superpixel_clustering_depth(
             mean_color = cv2.mean(lab_img, mask=mask)[:3]
             moments = cv2.moments(mask, binaryImage=True)
             centroid_y = int(moments["m01"] / moments["m00"]) if moments["m00"] != 0 else 0
-            normalized_y = (centroid_y / max(1, height)) * 100.0
+            normalized_y = (centroid_y / max(1, work_height)) * 100.0
             features.append([float(mean_color[0]), float(mean_color[1]), float(mean_color[2]), float(normalized_y)])
             centroids_y.append(centroid_y)
 
@@ -186,15 +200,18 @@ def superpixel_clustering_depth(
         for cluster_index in range(actual_clusters):
             y_coords = [centroids_y[i] for i in range(num_labels) if int(cluster_labels[i]) == cluster_index]
             if y_coords:
-                cluster_depths[cluster_index] = float((np.mean(y_coords) / max(1, height)) * 255.0)
-        depth_map = np.zeros((height, width), dtype=np.uint8)
+                cluster_depths[cluster_index] = float((np.mean(y_coords) / max(1, work_height)) * 255.0)
+        depth_map = np.zeros((work_height, work_width), dtype=np.uint8)
         for label_index in range(num_labels):
             depth_map[labels == label_index] = int(np.clip(cluster_depths[int(cluster_labels[label_index])], 0.0, 255.0))
         depth_map = cv2.bilateralFilter(depth_map, d=15, sigmaColor=80, sigmaSpace=80)
+        if depth_map.shape != (height, width):
+            depth_map = cv2.resize(depth_map, (width, height), interpolation=cv2.INTER_LINEAR)
         return depth_map, {
             "device": resolved_device,
             "using_cuda": using_cuda,
             "superpixels": num_labels,
+            "working_resolution": f"{work_width}x{work_height}",
             "gpu_steps": [],
             "cpu_steps": ["SLIC superpixel segmentation", "feature aggregation", "K-Means clustering", "depth smoothing"],
         }
@@ -205,8 +222,7 @@ def superpixel_clustering_depth(
     labels_t = torch.from_numpy(labels.reshape(-1)).to(device=torch_device, dtype=torch.long)
     lab_t = torch.from_numpy(lab_img.reshape(-1, 3).astype(np.float32)).to(torch_device)
 
-    y_coords = torch.arange(height, device=torch_device, dtype=torch.float32).unsqueeze(1).expand(height, width).reshape(-1)
-    ones = torch.ones(labels_t.shape[0], device=torch_device, dtype=torch.float32)
+    y_coords = torch.arange(work_height, device=torch_device, dtype=torch.float32).unsqueeze(1).expand(work_height, work_width).reshape(-1)
 
     counts = torch.bincount(labels_t, minlength=num_labels).clamp_min(1).to(torch.float32)
     color_sums = torch.zeros((num_labels, 3), dtype=torch.float32, device=torch_device)
@@ -216,7 +232,7 @@ def superpixel_clustering_depth(
     y_sums = torch.zeros(num_labels, dtype=torch.float32, device=torch_device)
     y_sums.index_add_(0, labels_t, y_coords)
     mean_y = y_sums / counts
-    normalized_y = (mean_y / max(1, height)) * 100.0
+    normalized_y = (mean_y / max(1, work_height)) * 100.0
     features = torch.cat((mean_colors, normalized_y.unsqueeze(1)), dim=1)
 
     cluster_labels = _torch_kmeans(features, num_clusters=num_clusters)
@@ -225,11 +241,11 @@ def superpixel_clustering_depth(
     cluster_depth_sums = torch.zeros(actual_clusters, dtype=torch.float32, device=torch_device)
     cluster_depth_sums.index_add_(0, cluster_labels, mean_y)
     cluster_counts = torch.bincount(cluster_labels, minlength=actual_clusters).clamp_min(1).to(torch.float32)
-    cluster_depths = (cluster_depth_sums / cluster_counts) / max(1, height) * 255.0
+    cluster_depths = (cluster_depth_sums / cluster_counts) / max(1, work_height) * 255.0
 
     label_depths = cluster_depths[cluster_labels]
     depth_flat = label_depths[labels_t]
-    depth_map_t = depth_flat.reshape(height, width).clamp(0.0, 255.0)
+    depth_map_t = depth_flat.reshape(work_height, work_width).clamp(0.0, 255.0)
 
     # 这里用高斯平滑近似原 bilateral 的温和平滑，保持主体思路不变，同时可在 GPU 上执行。
     kernel_size = 9
@@ -245,10 +261,13 @@ def superpixel_clustering_depth(
     ).squeeze(0).squeeze(0)
 
     depth_map = depth_map_t.round().clamp(0.0, 255.0).to(torch.uint8).detach().cpu().numpy()
+    if depth_map.shape != (height, width):
+        depth_map = cv2.resize(depth_map, (width, height), interpolation=cv2.INTER_LINEAR)
     return depth_map, {
         "device": resolved_device,
         "using_cuda": using_cuda,
         "superpixels": num_labels,
+        "working_resolution": f"{work_width}x{work_height}",
         "gpu_steps": [
             "superpixel feature aggregation",
             "K-Means clustering",
