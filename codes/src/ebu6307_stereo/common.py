@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 
 OFFICIAL_MIDDLEBURY_2021_SCENES = {
@@ -35,6 +38,7 @@ EXCLUDED_DATASET_DIR_NAMES = {"data", "o4_tiny_scene"}
 
 
 def discover_scenes(middlebury_root: Path) -> list[Path]:
+    """扫描 Middlebury 根目录，只返回项目真正要处理的标准场景目录。"""
     if not middlebury_root.exists():
         return []
 
@@ -50,15 +54,17 @@ def discover_scenes(middlebury_root: Path) -> list[Path]:
 
 
 def filter_scene_dirs(scene_dirs: list[Path], scene_name: str | None) -> list[Path]:
+    """按场景名过滤目录列表；scene_name 为空时直接返回原列表。"""
     if scene_name is None:
         return scene_dirs
     return [path for path in scene_dirs if path.name == scene_name]
 
 
 def load_rgb(path: Path) -> Any:
-    import numpy as np
+    """读取 RGB 图像。优先走 Pillow；若环境缺少 Pillow，则退回 macOS 的 sips 转换流程。"""
 
     try:
+        # Pillow 属于可选依赖：若用户环境未安装，则退回到系统自带 sips，避免整个项目无法运行。
         from PIL import Image
 
         return np.asarray(Image.open(path).convert("RGB"))
@@ -67,6 +73,7 @@ def load_rgb(path: Path) -> Any:
 
 
 def load_bgr(path: Path) -> Any:
+    """以 OpenCV 默认的 BGR 排列读取彩色图像，供特征提取与匹配流程使用。"""
     import cv2
 
     image = cv2.imread(str(path), cv2.IMREAD_COLOR)
@@ -76,9 +83,10 @@ def load_bgr(path: Path) -> Any:
 
 
 def load_gray(path: Path) -> Any:
-    import numpy as np
+    """读取灰度图。优先使用 OpenCV；若没有 cv2，则用 RGB 图像按亮度公式手工转灰度。"""
 
     try:
+        # OpenCV 属于可选依赖：没有它时仍可通过备用路径得到灰度图。
         import cv2
 
         image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
@@ -91,7 +99,7 @@ def load_gray(path: Path) -> Any:
 
 
 def read_image_with_sips(path: Path) -> Any:
-    import subprocess
+    """使用 macOS sips 把原图转成 BMP，再走纯 Python BMP 解析，作为无 Pillow/OpenCV 时的兜底方案。"""
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         bmp_path = Path(tmp_dir) / f"{path.stem}.bmp"
@@ -105,18 +113,19 @@ def read_image_with_sips(path: Path) -> Any:
 
 
 def write_png(path: Path, image: Any) -> None:
-    import numpy as np
+    """写出 PNG 预览图。优先用 Pillow；若缺失则先写 BMP，再借助 sips 转成 PNG。"""
 
     ensure_parent(path)
     image = np.asarray(image, dtype=np.uint8)
 
     try:
+        # Pillow 属于可选依赖：若用户环境未安装，则退回到系统自带 sips，避免整个项目无法运行。
         from PIL import Image
 
         Image.fromarray(image).save(path, format="PNG")
         return
     except ImportError:
-        import subprocess
+        # subprocess 已在文件顶部导入；这里保留注释说明该分支依赖系统 sips，而不是额外 Python 包。
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             bmp_path = Path(tmp_dir) / f"{path.stem}.bmp"
@@ -130,7 +139,7 @@ def write_png(path: Path, image: Any) -> None:
 
 
 def read_bmp(path: Path) -> Any:
-    import numpy as np
+    """读取 24-bit BMP 文件并转成 RGB numpy 数组。"""
 
     data = path.read_bytes()
     if data[:2] != b"BM":
@@ -165,7 +174,7 @@ def read_bmp(path: Path) -> Any:
 
 
 def write_bmp(path: Path, image: Any) -> None:
-    import numpy as np
+    """把灰度图或 RGB 图编码为最简单的 24-bit BMP 文件。"""
 
     image = np.asarray(image, dtype=np.uint8)
     if image.ndim == 2:
@@ -205,16 +214,18 @@ def write_bmp(path: Path, image: Any) -> None:
 
 
 def ensure_parent(path: Path) -> None:
+    """确保目标路径的父目录存在，避免写文件时报目录不存在错误。"""
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
 def write_scene_text(path: Path, lines: list[str]) -> None:
+    """把说明性文本统一写成 UTF-8 文本文件，并自动补结尾换行。"""
     ensure_parent(path)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def normalize_for_preview(disparity: Any, mask: Any) -> Any:
-    import numpy as np
+    """把任意浮点视差/误差图缩放到 0~255，方便生成可视化预览。"""
 
     preview = np.zeros(disparity.shape, dtype=np.uint8)
     finite_mask = np.asarray(mask, dtype=bool) & np.isfinite(disparity)
@@ -231,7 +242,7 @@ def normalize_for_preview(disparity: Any, mask: Any) -> Any:
 
 
 def evaluate_disparity(predicted: Any, ground_truth: Any) -> dict[str, float | int]:
-    import numpy as np
+    """按有效像素区域评估预测视差与真值视差的误差指标。"""
 
     predicted_valid = predicted > 0
     ground_truth_valid = np.isfinite(ground_truth) & (ground_truth > 0)

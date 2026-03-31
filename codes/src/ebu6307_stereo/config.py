@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .o4_dinov2 import resolve_dinov2_checkpoint_path
+
 
 @dataclass(frozen=True)
 class O1Config:
@@ -99,7 +101,7 @@ class AppConfig:
 
 
 def load_config(config_path: Path, profile: str) -> AppConfig:
-    from .o4_dinov2 import resolve_dinov2_checkpoint_path
+    """读取配置文件并补齐默认值，最终组装成各目标阶段统一使用的 AppConfig。"""
 
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
@@ -316,6 +318,7 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
 
 
 def resolve_path(repo_root: Path, value: str) -> Path:
+    """把相对路径解析到仓库根目录下，绝对路径则保持不变。"""
     path = Path(value).expanduser()
     if not path.is_absolute():
         path = repo_root / path
@@ -323,6 +326,7 @@ def resolve_path(repo_root: Path, value: str) -> Path:
 
 
 def parse_simple_yaml(text: str) -> dict[str, Any]:
+    """解析本项目约定的极简 YAML 子集，只支持缩进映射结构。"""
     root: dict[str, Any] = {}
     stack: list[tuple[int, dict[str, Any]]] = [(-1, root)]
 
@@ -353,6 +357,7 @@ def parse_simple_yaml(text: str) -> dict[str, Any]:
 
 
 def parse_simple_yaml_scalar(value: str) -> Any:
+    """把 YAML 标量文本转成 bool/int/float/str。"""
     lowered = value.lower()
     if lowered == "true":
         return True

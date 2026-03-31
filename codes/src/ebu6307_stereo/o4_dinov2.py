@@ -148,6 +148,7 @@ def resolve_o4_execution_mode(
 
 
 def _require_torch() -> Any:
+    """按需导入 torch。这里保留函数内导入，是因为 torch 属于重量级可选依赖；仅在真正走 torch/DINO 路径时才需要它。"""
     import torch
 
     return torch
@@ -194,6 +195,7 @@ def resolve_dinov2_repo_path(repo_path: str | Path | None) -> Path | None:
 
 def _prepare_downsampled_gray(image: Any, downsample_factor: int, device: str) -> Any:
     torch = _require_torch()
+    # 这里保留局部导入：F 只在 torch 路径中使用，避免模块导入阶段强依赖 torch.nn。
     import torch.nn.functional as F
 
     if torch.is_tensor(image):
@@ -404,6 +406,7 @@ def extract_dinov2_descriptors(
     device: str,
     return_numpy: bool,
 ) -> tuple[Any, int, int, int]:
+    # 这里保留局部导入：F 只在 torch 路径中使用，避免模块导入阶段强依赖 torch.nn。
     import torch.nn.functional as F
 
     model, patch_size = _load_dinov2_model(model_name, checkpoint_path, device, repo_path=repo_path)

@@ -3,8 +3,11 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import cv2
+
 
 def parse_args() -> argparse.Namespace:
+    """解析提取临时左右视频帧所需的命令行参数。"""
     parser = argparse.ArgumentParser(
         description=(
             "Extract one temporary left/right frame pair from stereo videos into a "
@@ -39,16 +42,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def require_existing_file(path: Path, label: str) -> None:
+    """确保输入视频文件存在。"""
     if not path.exists() or not path.is_file():
         raise FileNotFoundError(f"{label} not found: {path}")
 
 
 def derive_scene_name(left_video: Path, right_video: Path) -> str:
+    """根据左右视频文件名生成默认场景目录名。"""
     return f"tmp_fallback_{left_video.stem}_{right_video.stem}"
 
 
 def read_frame(video_path: Path, frame_index: int):
-    import cv2
+    """从指定视频中读取某一帧。"""
 
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
@@ -78,6 +83,7 @@ def write_readme(
     left_shape: tuple[int, ...],
     right_shape: tuple[int, ...],
 ) -> None:
+    """写出临时场景 README，记录来源并强调其不是最终实验数据。"""
     readme_path.write_text(
         "\n".join(
             [
@@ -106,6 +112,7 @@ def write_readme(
 
 
 def main() -> int:
+    """执行临时左右帧提取流程。"""
     args = parse_args()
 
     if args.frame_index < 0:
@@ -126,7 +133,6 @@ def main() -> int:
         print("describe_only=true")
         return 0
 
-    import cv2
 
     left_frame = read_frame(args.left_video, args.frame_index)
     right_frame = read_frame(args.right_video, args.frame_index)

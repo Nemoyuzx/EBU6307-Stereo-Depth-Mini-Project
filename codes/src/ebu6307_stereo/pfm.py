@@ -3,9 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 
 def read_pfm(path: Path) -> Any:
-    import numpy as np
+    """读取 PFM 浮点图，支持灰度与三通道格式。"""
 
     with path.open("rb") as handle:
         header = handle.readline().decode("ascii").strip()
@@ -36,7 +38,7 @@ def read_pfm(path: Path) -> Any:
 
 
 def write_pfm(path: Path, image: Any, scale: float = 1.0) -> None:
-    import numpy as np
+    """写出 PFM 浮点图，保持与常见视差数据格式兼容。"""
 
     array = np.asarray(image, dtype=np.float32)
     if array.ndim == 2:

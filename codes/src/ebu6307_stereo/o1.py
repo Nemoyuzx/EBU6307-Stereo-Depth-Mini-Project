@@ -6,13 +6,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from .common import discover_scenes, ensure_parent, filter_scene_dirs, load_rgb
 from .config import O1Config
 from .pfm import write_pfm
 
 
 def synthesize_shift(image: Any, shift_pixels: int) -> Any:
-    import numpy as np
+    """把左图沿水平方向平移，合成一个最简右图，用于 O1 的工程化验证。"""
 
     shifted = np.zeros_like(image)
     if shift_pixels == 0:
@@ -31,7 +33,7 @@ def synthesize_shift(image: Any, shift_pixels: int) -> Any:
 
 
 def synthesize_disparity(height: int, width: int, shift_pixels: int) -> Any:
-    import numpy as np
+    """根据固定平移量构造理想视差图，作为 O1 输出的基准真值。"""
 
     disparity = np.zeros((height, width), dtype=np.float32)
     if shift_pixels == 0 or abs(shift_pixels) >= width:
@@ -45,7 +47,9 @@ def synthesize_disparity(height: int, width: int, shift_pixels: int) -> Any:
 
 
 def compute_ssim(left_image: Any, synthetic_image: Any) -> float:
-    import numpy as np
+    """手工实现一个简化版多通道 SSIM，用于衡量原始左图和合成右图的结构相似性。"""
+
+    # 这里保留局部导入：SciPy 只在真正计算 SSIM 时才需要，避免仅做 dry-run/导入检查时强依赖该可选库。
     from scipy.ndimage import gaussian_filter
 
     left = np.asarray(left_image, dtype=np.float64)
@@ -85,6 +89,7 @@ def compute_ssim(left_image: Any, synthetic_image: Any) -> float:
 
 
 def read_metrics(metrics_file: Path) -> list[dict[str, str]]:
+    """读取历史 SSIM 指标，便于增量更新同一个 CSV。"""
     if not metrics_file.exists():
         return []
 
@@ -98,6 +103,7 @@ def read_metrics(metrics_file: Path) -> list[dict[str, str]]:
 
 
 def copy_if_exists(source: Path, destination: Path) -> bool:
+    """若源文件存在则复制到目标位置，并返回是否复制成功。"""
     if not source.exists():
         return False
     ensure_parent(destination)
@@ -106,6 +112,7 @@ def copy_if_exists(source: Path, destination: Path) -> bool:
 
 
 def write_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) -> None:
+    """按 scene 合并新旧 SSIM 指标，避免重复追加同一场景。"""
     existing_rows = read_metrics(metrics_file)
     rows_by_scene = {str(row["scene"]): row for row in rows}
     merged_rows: list[dict[str, str | float | int]] = []
@@ -125,6 +132,7 @@ def write_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) 
 
 
 def write_scene_metadata(scene_output_dir: Path, scene_name: str, shift_pixels: int, calib_copied: bool) -> None:
+    """为每个合成场景生成 README，说明文件来源与参数。"""
     metadata_path = scene_output_dir / "README.txt"
     metadata_path.write_text(
         "\n".join(
@@ -143,6 +151,7 @@ def write_scene_metadata(scene_output_dir: Path, scene_name: str, shift_pixels: 
 
 
 def validate_results(synthetic_dir: Path, scene_name: str | None = None) -> int:
+    """检查 O1 输出目录结构是否完整。"""
     required_files = ("im0.png", "im1.png", "disp0.pfm")
     optional_files = ("calib.txt",)
 
@@ -200,6 +209,7 @@ def validate_results(synthetic_dir: Path, scene_name: str | None = None) -> int:
 
 
 def run(config: O1Config, max_scenes: int | None, dry_run: bool, scene_name: str | None) -> int:
+    """执行 O1：发现场景、生成合成右图与视差图、写出指标。"""
     discovered_scenes = discover_scenes(config.middlebury_root)
     discovered_count = len(discovered_scenes)
     scenes = filter_scene_dirs(discovered_scenes, scene_name)
@@ -247,6 +257,7 @@ def run(config: O1Config, max_scenes: int | None, dry_run: bool, scene_name: str
         print("Dry run requested; no outputs were written.")
         return 0
 
+    # 这里保留局部导入：Pillow 只在真正写出 im1.png 时需要，避免 CLI 仅导入模块时就要求安装该可选依赖。
     from PIL import Image
 
     config.synthetic_dir.mkdir(parents=True, exist_ok=True)

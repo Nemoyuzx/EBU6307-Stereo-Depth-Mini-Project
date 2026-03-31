@@ -11,6 +11,7 @@ from .o4_dinov2 import resolve_dinov2_checkpoint_path
 
 
 def parse_args() -> argparse.Namespace:
+    """解析命令行参数，统一入口参数命名。"""
     parser = argparse.ArgumentParser(
         description="Minimal stereo assignment CLI with stable O1/O2/O3 behavior and a minimal runnable O4 baseline."
     )
@@ -84,6 +85,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """加载配置并根据 objective 分发到 O1/O2/O3/O4。"""
     args = parse_args()
     try:
         config = load_config(args.config, args.profile)

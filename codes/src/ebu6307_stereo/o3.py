@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import csv
 import sys
+from collections import deque
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from .common import (
     discover_scenes,
@@ -20,6 +23,7 @@ from .pfm import read_pfm, write_pfm
 
 
 def read_metrics(metrics_file: Path) -> list[dict[str, str]]:
+    """读取 O3 历史指标。"""
     if not metrics_file.exists():
         return []
 
@@ -40,6 +44,7 @@ def read_metrics(metrics_file: Path) -> list[dict[str, str]]:
 
 
 def write_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) -> None:
+    """按场景合并并回写 O3 指标。"""
     existing_rows = read_metrics(metrics_file)
     rows_by_scene = {str(row["scene"]): row for row in rows}
     merged_rows: list[dict[str, str | float | int]] = []
@@ -69,7 +74,7 @@ def write_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) 
 
 
 def median_filter_2d(image: Any, kernel_size: int) -> Any:
-    import numpy as np
+    """对二维数组做中值滤波，抑制离群视差。"""
 
     if kernel_size <= 1:
         return image
@@ -81,7 +86,7 @@ def median_filter_2d(image: Any, kernel_size: int) -> Any:
 
 
 def box_filter_sum(image: Any, radius: int) -> Any:
-    import numpy as np
+    """用积分图思想求窗口求和，加速代价聚合。"""
 
     if radius <= 0:
         return np.asarray(image, dtype=np.float32)
@@ -98,7 +103,7 @@ def box_filter_sum(image: Any, radius: int) -> Any:
 
 
 def bit_count_array(values: Any) -> Any:
-    import numpy as np
+    """统计 census 编码异或后的 bit 数量。"""
 
     array = np.asarray(values)
     if hasattr(np, "bitwise_count"):
@@ -109,7 +114,7 @@ def bit_count_array(values: Any) -> Any:
 
 
 def compute_horizontal_gradient(image: Any) -> Any:
-    import numpy as np
+    """计算水平方向梯度，辅助匹配代价估计。"""
 
     source = np.asarray(image, dtype=np.float32)
     gradient = np.zeros_like(source, dtype=np.float32)
@@ -121,7 +126,7 @@ def compute_horizontal_gradient(image: Any) -> Any:
 
 
 def compute_census_transform(image: Any, window_size: int) -> Any:
-    import numpy as np
+    """计算局部 census 描述子，用于增强亮度变化鲁棒性。"""
 
     source = np.asarray(image, dtype=np.float32)
     height, width = source.shape
@@ -156,7 +161,6 @@ def compute_matching_cost(
     disparity: int,
     target_direction: str = "negative",
 ) -> Any:
-    import numpy as np
 
     reference = np.asarray(reference_gray, dtype=np.float32)
     target = np.asarray(target_gray, dtype=np.float32)
@@ -205,7 +209,6 @@ def compute_matching_minima(
     config: O3Config,
     target_direction: str = "negative",
 ) -> tuple[Any, Any, Any]:
-    import numpy as np
 
     reference = np.asarray(reference_gray, dtype=np.float32)
     target = np.asarray(target_gray, dtype=np.float32)
@@ -254,7 +257,6 @@ def refine_subpixel_disparity(
     config: O3Config,
     target_direction: str = "negative",
 ) -> Any:
-    import numpy as np
 
     disparity = np.asarray(integer_disparity, dtype=np.float32)
     height, width = disparity.shape
@@ -301,7 +303,7 @@ def refine_subpixel_disparity(
 
 
 def left_right_consistency_mask(left_disparity: Any, right_disparity: Any, threshold: float) -> Any:
-    import numpy as np
+    """执行左右一致性检查，过滤明显错误的匹配。"""
 
     left = np.asarray(left_disparity, dtype=np.float32)
     right = np.asarray(right_disparity, dtype=np.float32)
@@ -316,7 +318,7 @@ def left_right_consistency_mask(left_disparity: Any, right_disparity: Any, thres
 
 
 def fill_invalid_disparity(disparity: Any, passes: int) -> Any:
-    import numpy as np
+    """对无效视差做行列方向的邻域传播填补。"""
 
     filled = np.asarray(disparity, dtype=np.float32).copy()
     if passes <= 0:
@@ -392,9 +394,8 @@ def fill_invalid_disparity(disparity: Any, passes: int) -> Any:
 
 
 def filter_speckles(disparity: Any, window_size: int, disparity_range: int) -> Any:
-    from collections import deque
+    """移除过小且离散的 speckle 连通域。"""
 
-    import numpy as np
 
     filtered = np.asarray(disparity, dtype=np.float32).copy()
     if window_size <= 0:
@@ -446,7 +447,7 @@ def filter_speckles(disparity: Any, window_size: int, disparity_range: int) -> A
 
 
 def compute_numpy_block_disparity(left_gray: Any, right_gray: Any, config: O3Config) -> Any:
-    import numpy as np
+    """使用纯 numpy 代价体与后处理得到稠密视差。"""
 
     left = np.asarray(left_gray, dtype=np.float32)
     right = np.asarray(right_gray, dtype=np.float32)
@@ -516,7 +517,6 @@ def filter_stereo_feature_matches(
     matches: list[Any],
     config: O3Config,
 ) -> list[Any]:
-    import numpy as np
 
     valid_matches: list[Any] = []
     max_disparity = float(config.num_disparities)
@@ -540,7 +540,6 @@ def build_seed_disparity(
     matches: list[Any],
     image_shape: tuple[int, int],
 ) -> tuple[Any, Any]:
-    import numpy as np
 
     height, width = image_shape
     seed_disparity = np.zeros((height, width), dtype=np.float32)
@@ -562,7 +561,7 @@ def build_seed_disparity(
 
 
 def interpolate_seed_rows(seed_disparity: Any, seed_mask: Any) -> tuple[Any, Any]:
-    import numpy as np
+    """先沿行方向把稀疏种子插值成连续视差。"""
 
     disparity = np.zeros_like(seed_disparity, dtype=np.float32)
     row_mask = np.zeros_like(seed_mask, dtype=bool)
@@ -586,7 +585,7 @@ def interpolate_seed_rows(seed_disparity: Any, seed_mask: Any) -> tuple[Any, Any
 
 
 def interpolate_seed_columns(row_disparity: Any, row_mask: Any) -> Any:
-    import numpy as np
+    """再沿列方向补齐没有种子的行。"""
 
     disparity = np.asarray(row_disparity, dtype=np.float32).copy()
     valid_rows = np.flatnonzero(np.any(row_mask, axis=1))
@@ -618,7 +617,7 @@ def interpolate_seed_columns(row_disparity: Any, row_mask: Any) -> Any:
 
 
 def compute_sift_driven_disparity(left_gray: Any, right_gray: Any, config: O3Config) -> tuple[Any, dict[str, int]]:
-    import numpy as np
+    """以 SIFT 稀疏匹配为引导生成简化视差图。"""
 
     detector = create_sift_detector(config.max_features, config.contrast_threshold)
     left_keypoints, left_descriptors = detector.detectAndCompute(left_gray, None)
@@ -684,7 +683,7 @@ def compute_sift_driven_disparity(left_gray: Any, right_gray: Any, config: O3Con
 
 
 def average_pool_gray(image: Any, factor: int) -> Any:
-    import numpy as np
+    """对灰度图做平均池化降采样。"""
 
     if factor <= 1:
         return image
@@ -698,7 +697,7 @@ def average_pool_gray(image: Any, factor: int) -> Any:
 
 
 def average_pool_2d(image: Any, factor: int) -> Any:
-    import numpy as np
+    """对二维浮点图做平均池化降采样。"""
 
     source = np.asarray(image, dtype=np.float32)
     if factor <= 1:
@@ -712,6 +711,7 @@ def average_pool_2d(image: Any, factor: int) -> Any:
 
 
 def validate_results(disparity_dir: Path, analysis_dir: Path, metrics_file: Path, scene_name: str | None = None) -> int:
+    """验证 O3 输出结果文件。"""
     print(f"Validating O3 disparity directory: {disparity_dir}")
     print(f"Validating O3 analysis directory: {analysis_dir}")
     print(f"Validating O3 metrics file: {metrics_file}")
@@ -765,7 +765,6 @@ def run(
     dry_run: bool,
     scene_name: str | None,
 ) -> int:
-    import numpy as np
 
     discovered_scenes = discover_scenes(middlebury_root)
     discovered_count = len(discovered_scenes)

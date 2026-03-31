@@ -5,12 +5,14 @@ from typing import Any
 
 
 def _require_torch() -> Any:
+    """按需导入 torch。这里保留函数内导入，是因为 torch 属于重量级可选依赖；仅在真正走 torch/DINO 路径时才需要它。"""
     import torch
 
     return torch
 
 
 def _as_float_tensor(values: Any, device: str) -> Any:
+    # 这里保留局部导入：仅在把非 tensor 输入转成 tensor 时才需要 numpy。
     import numpy as np
 
     torch = _require_torch()
@@ -20,6 +22,7 @@ def _as_float_tensor(values: Any, device: str) -> Any:
 
 
 def _as_int_tensor(values: Any, device: str, *, dtype: Any) -> Any:
+    # 这里保留局部导入：仅在把非 tensor 输入转成 tensor 时才需要 numpy。
     import numpy as np
 
     torch = _require_torch()
@@ -30,6 +33,7 @@ def _as_int_tensor(values: Any, device: str, *, dtype: Any) -> Any:
 
 def _box_filter_sum_torch(image: Any, radius: int) -> Any:
     torch = _require_torch()
+    # 这里保留局部导入：F 只在 torch 路径中使用，避免模块导入阶段强依赖 torch.nn。
     import torch.nn.functional as F
 
     source = image if image.ndim == 4 else image.unsqueeze(0).unsqueeze(0)
@@ -89,6 +93,7 @@ def _shift_3d_tensor(image: Any, disparity: int, target_direction: str, fill_val
 
 def average_pool_gray_torch(image: Any, factor: int, *, device: str) -> Any:
     torch = _require_torch()
+    # 这里保留局部导入：F 只在 torch 路径中使用，避免模块导入阶段强依赖 torch.nn。
     import torch.nn.functional as F
 
     source = _as_float_tensor(image, device)
@@ -103,6 +108,7 @@ def average_pool_gray_torch(image: Any, factor: int, *, device: str) -> Any:
 
 
 def average_pool_2d_torch(image: Any, factor: int, *, device: str) -> Any:
+    # 这里保留局部导入：F 只在 torch 路径中使用，避免模块导入阶段强依赖 torch.nn。
     import torch.nn.functional as F
 
     source = _as_float_tensor(image, device)
@@ -117,6 +123,7 @@ def average_pool_2d_torch(image: Any, factor: int, *, device: str) -> Any:
 
 
 def median_filter_2d_torch(image: Any, kernel_size: int, *, device: str) -> Any:
+    # 这里保留局部导入：F 只在 torch 路径中使用，避免模块导入阶段强依赖 torch.nn。
     import torch.nn.functional as F
 
     source = _as_float_tensor(image, device)
@@ -433,6 +440,7 @@ def compute_block_disparity_torch(left_gray: Any, right_gray: Any, config: Any, 
             for dy, dx in census_offsets
         ], dim=0)
         if radius > 0:
+            # 这里保留局部导入：F 只在 torch 路径中使用，避免模块导入阶段强依赖 torch.nn。
             import torch.nn.functional as F
 
             left_census = F.pad(left_census, (radius, radius, radius, radius))
@@ -610,6 +618,7 @@ def train_o4_torch_model(
     device: str,
 ) -> Any | None:
     import torch
+    # 这里保留局部导入：F 只在 torch 路径中使用，避免模块导入阶段强依赖 torch.nn。
     import torch.nn.functional as F
 
     if training_descriptors.size == 0 or candidate_descriptors.size == 0 or epochs <= 0:

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from .common import (
     discover_scenes,
     evaluate_disparity,
@@ -62,6 +64,7 @@ class O4ModelState:
 
 
 def read_metrics(metrics_file: Path) -> list[dict[str, str]]:
+    """读取 O4 历史指标。"""
     if not metrics_file.exists():
         return []
 
@@ -86,6 +89,7 @@ def read_metrics(metrics_file: Path) -> list[dict[str, str]]:
 
 
 def write_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) -> None:
+    """按场景合并并回写 O4 场景级指标。"""
     existing_rows = read_metrics(metrics_file)
     rows_by_scene = {str(row["scene"]): row for row in rows}
     merged_rows: list[dict[str, str | float | int]] = []
@@ -119,6 +123,7 @@ def write_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) 
 
 
 def write_fold_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) -> None:
+    """写出按交叉验证 fold 汇总的统计表。"""
     metrics_file.parent.mkdir(parents=True, exist_ok=True)
     with metrics_file.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
@@ -137,7 +142,7 @@ def write_fold_metrics(metrics_file: Path, rows: list[dict[str, str | float | in
 
 
 def box_filter_mean(image: Any, kernel_size: int) -> Any:
-    import numpy as np
+    """基于 box_filter_sum 计算局部均值。"""
 
     if kernel_size <= 1:
         return np.asarray(image, dtype=np.float32)
@@ -147,7 +152,7 @@ def box_filter_mean(image: Any, kernel_size: int) -> Any:
 
 
 def build_token_descriptors(image: Any, patch_size: int, context_window_size: int) -> tuple[Any, int, int]:
-    import numpy as np
+    """把灰度图编码成 patch token 描述子，供 numpy 后端使用。"""
 
     source = np.asarray(image, dtype=np.float32) / 255.0
     gradient_x = compute_horizontal_gradient(source)
@@ -176,7 +181,7 @@ def build_token_descriptors(image: Any, patch_size: int, context_window_size: in
 
 
 def extract_baseline_patch_tokens(image: Any, patch_size: int) -> tuple[Any, int, int]:
-    import numpy as np
+    """提取最基础的 patch token 并做归一化。"""
 
     source = np.asarray(image, dtype=np.float32)
     height, width = source.shape
@@ -196,7 +201,7 @@ def extract_baseline_patch_tokens(image: Any, patch_size: int) -> tuple[Any, int
 
 
 def project_token_descriptors(descriptors: Any, projection: Any | None) -> Any:
-    import numpy as np
+    """把描述子投影到训练后的低维空间。"""
 
     source = np.asarray(descriptors, dtype=np.float32)
     if projection is None:
@@ -214,7 +219,6 @@ def predict_token_disparity(
     max_disparity: int,
     target_direction: str = "negative",
 ) -> tuple[Any, Any, Any]:
-    import numpy as np
 
     token_height, token_width, _ = left_tokens.shape
     best_scores = np.full((token_height, token_width), -np.inf, dtype=np.float32)
@@ -251,7 +255,7 @@ def predict_token_disparity(
 
 
 def refine_token_disparity(best_disparity: Any, all_scores: Any, min_disparity: int, max_disparity: int) -> Any:
-    import numpy as np
+    """对 token 级最佳视差做二次曲线细化。"""
 
     refined = np.asarray(best_disparity, dtype=np.float32).copy()
     if max_disparity <= min_disparity:
@@ -275,7 +279,7 @@ def refine_token_disparity(best_disparity: Any, all_scores: Any, min_disparity: 
 
 
 def soft_argmax_disparity(all_scores: Any, min_disparity: int, max_disparity: int, temperature: float) -> Any:
-    import numpy as np
+    """用 soft-argmax 从整条得分曲线回归连续视差。"""
 
     scores = np.asarray(all_scores, dtype=np.float32)
     if scores.ndim != 3:
@@ -308,7 +312,7 @@ def regress_token_disparity(
 
 
 def build_token_ground_truth(disparity: Any, token_span: int, patch_size: int, token_shape: tuple[int, int]) -> Any:
-    import numpy as np
+    """把像素级真值视差压缩成 token 级监督标签。"""
 
     source = np.asarray(disparity, dtype=np.float32)
     token_height, token_width = token_shape
@@ -331,7 +335,7 @@ def build_token_ground_truth(disparity: Any, token_span: int, patch_size: int, t
 
 
 def train_o4_numpy_projection(training_descriptors: Any, candidate_descriptors: Any, config: O4Config) -> Any | None:
-    import numpy as np
+    """训练一个最小可运行的 numpy 投影模型。"""
 
     if training_descriptors.size == 0 or candidate_descriptors.size == 0 or config.training_epochs <= 0:
         return None
@@ -415,7 +419,7 @@ def train_o4_model(
 
 
 def collect_o4_training_samples(scene_payloads: list[dict[str, Any]], eval_fold: int, config: O4Config) -> tuple[Any, Any]:
-    import numpy as np
+    """从非验证 fold 的场景中收集训练样本。"""
 
     rng = np.random.default_rng(config.random_seed + eval_fold)
     left_samples: list[Any] = []
@@ -479,7 +483,7 @@ def collect_o4_training_samples(scene_payloads: list[dict[str, Any]], eval_fold:
 
 
 def upsample_token_grid(token_values: Any, span: int, output_height: int, output_width: int) -> Any:
-    import numpy as np
+    """把 token 网格还原回像素分辨率。"""
 
     upsampled = np.repeat(np.repeat(token_values, span, axis=0), span, axis=1)
     result = np.zeros((output_height, output_width), dtype=upsampled.dtype)
@@ -490,6 +494,7 @@ def upsample_token_grid(token_values: Any, span: int, output_height: int, output
 
 
 def estimate_o4_working_set_mb(token_height: int, token_width: int, token_dim: int) -> float:
+    """粗略估计 O4 推理时的工作集内存。"""
     token_bytes = token_height * token_width * token_dim * 4 * 2
     score_bytes = token_height * token_width * 4 * 4
     total_bytes = token_bytes + score_bytes
@@ -497,6 +502,7 @@ def estimate_o4_working_set_mb(token_height: int, token_width: int, token_dim: i
 
 
 def summarize_o4_folds(rows: list[dict[str, str | int | float]], num_folds: int) -> list[dict[str, str | int | float]]:
+    """把场景级指标汇总成 fold 级平均指标。"""
     fold_rows: list[dict[str, str | int | float]] = []
     for fold_index in range(num_folds):
         matching = [row for row in rows if int(row["fold"]) == fold_index]
@@ -518,6 +524,7 @@ def summarize_o4_folds(rows: list[dict[str, str | int | float]], num_folds: int)
 
 
 def validate_results(disparity_dir: Path, analysis_dir: Path, metrics_file: Path, scene_name: str | None = None) -> int:
+    """验证 O4 输出文件。"""
     print(f"Validating O4 disparity directory: {disparity_dir}")
     print(f"Validating O4 analysis directory: {analysis_dir}")
     print(f"Validating O4 metrics file: {metrics_file}")
@@ -572,7 +579,6 @@ def run(
     dry_run: bool,
     scene_name: str | None,
 ) -> int:
-    import numpy as np
 
     discovered_scenes = discover_scenes(middlebury_root)
     discovered_count = len(discovered_scenes)

@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from .common import discover_scenes, filter_scene_dirs, load_bgr, load_gray, write_scene_text
 from .config import O2Config
 
@@ -33,6 +35,7 @@ DISTINCT_TRANSFORM_FAMILIES = (
 
 
 def read_metrics(metrics_file: Path) -> list[dict[str, str]]:
+    """读取 O2 历史指标。"""
     if not metrics_file.exists():
         return []
 
@@ -47,6 +50,7 @@ def read_metrics(metrics_file: Path) -> list[dict[str, str]]:
 
 
 def write_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) -> None:
+    """按场景合并并回写 O2 指标。"""
     existing_rows = read_metrics(metrics_file)
     rows_by_scene = {str(row["scene"]): row for row in rows}
     merged_rows: list[dict[str, str | float | int]] = []
@@ -66,6 +70,9 @@ def write_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) 
 
 
 def create_sift_detector(max_features: int, contrast_threshold: float) -> Any:
+    """创建 SIFT 检测器，并在环境不支持 SIFT 时给出明确报错。"""
+
+    # 这里保留局部导入：OpenCV 属于可选依赖，避免用户仅导入 CLI 或做配置检查时直接失败。
     import cv2
 
     if not hasattr(cv2, "SIFT_create"):
@@ -74,12 +81,16 @@ def create_sift_detector(max_features: int, contrast_threshold: float) -> Any:
 
 
 def draw_keypoints(image_bgr: Any, keypoints: Any) -> Any:
+    """把关键点以可视化形式画到图像上，便于结果检查。"""
+
+    # 这里保留局部导入：OpenCV 属于可选依赖，只有真正绘图时才需要它。
     import cv2
 
     return cv2.drawKeypoints(image_bgr, keypoints, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
 
 
 def _ratio_filtered_matches(knn_matches: Any, ratio_test: float) -> list[Any]:
+    """对 KNN 匹配应用 Lowe ratio test。"""
     filtered: list[Any] = []
     for pair in knn_matches:
         if len(pair) < 2:
@@ -91,6 +102,9 @@ def _ratio_filtered_matches(knn_matches: Any, ratio_test: float) -> list[Any]:
 
 
 def _mutual_ratio_matches(left_descriptors: Any, right_descriptors: Any, ratio_test: float) -> tuple[int, list[Any], list[Any]]:
+    """先做双向 KNN+ratio test，再取互为匹配的描述子对，减少偶然误匹配。"""
+
+    # 这里保留局部导入：OpenCV 属于可选依赖，且该函数只在真实匹配阶段调用。
     import cv2
 
     matcher = cv2.BFMatcher(cv2.NORM_L2)
@@ -105,8 +119,10 @@ def _mutual_ratio_matches(left_descriptors: Any, right_descriptors: Any, ratio_t
 
 
 def _geometric_inlier_matches(left_keypoints: Any, right_keypoints: Any, matches: list[Any]) -> tuple[list[Any], int]:
+    """使用基础矩阵 RANSAC 剔除几何上明显不合理的匹配。"""
+
+    # 这里保留局部导入：OpenCV 属于可选依赖，只有进入几何验证分支时才会使用。
     import cv2
-    import numpy as np
 
     if len(matches) < 8:
         return matches, 0
@@ -125,6 +141,7 @@ def _geometric_inlier_matches(left_keypoints: Any, right_keypoints: Any, matches
 
 
 def _select_geometry_aware_matches(left_keypoints: Any, right_keypoints: Any, ratio_filtered: list[Any], mutual_matches: list[Any]) -> tuple[list[Any], int]:
+    """结合 mutual matching 和 RANSAC 结果选择更稳健的匹配集合。"""
     candidate_matches = ratio_filtered
     mutual_retention = (len(mutual_matches) / len(ratio_filtered)) if ratio_filtered else 0.0
     if len(mutual_matches) >= 24 and mutual_retention >= 0.75:
@@ -140,7 +157,7 @@ def _select_geometry_aware_matches(left_keypoints: Any, right_keypoints: Any, ra
 
 
 def _project_point(homography: Any, x: float, y: float) -> tuple[float, float] | None:
-    import numpy as np
+    """把图像点通过单应矩阵投影到变换后坐标系；若齐次坐标退化则返回 None。"""
 
     point = np.asarray([x, y, 1.0], dtype=np.float64)
     projected = homography @ point
@@ -150,20 +167,23 @@ def _project_point(homography: Any, x: float, y: float) -> tuple[float, float] |
 
 
 def _rng_for_scene(scene_name: str) -> tuple[int, Any]:
-    import numpy as np
+    """为每个场景稳定地产生随机种子，保证多次运行结果可复现。"""
 
     seed = int(hashlib.sha256(scene_name.encode("utf-8")).hexdigest()[:16], 16) % (2**32)
     return seed, np.random.default_rng(seed)
 
 
 def _transform_family(scene_name: str, scene_index: int) -> str:
+    """稳定地为场景挑选一种变换族。"""
     _, rng = _rng_for_scene(f"family::{scene_index}::{scene_name}")
     return str(rng.choice(DISTINCT_TRANSFORM_FAMILIES))
 
 
 def _rotation_matrix(width: int, height: int, angle_deg: float, scale: float) -> Any:
+    """构造绕图像中心旋转/缩放的 3x3 单应矩阵。"""
+
+    # 这里保留局部导入：OpenCV 属于可选依赖，仅在构造随机几何变换时才会使用。
     import cv2
-    import numpy as np
 
     center = (width / 2.0, height / 2.0)
     affine = cv2.getRotationMatrix2D(center, angle_deg, scale)
@@ -173,7 +193,7 @@ def _rotation_matrix(width: int, height: int, angle_deg: float, scale: float) ->
 
 
 def _affine_homography(width: int, height: int, rng: Any) -> tuple[Any, dict[str, float]]:
-    import numpy as np
+    """随机生成仿射风格的单应矩阵及其参数说明。"""
 
     angle_deg = float(rng.uniform(-16.0, 16.0))
     scale = float(rng.uniform(0.88, 1.12))
@@ -235,8 +255,10 @@ def _affine_homography(width: int, height: int, rng: Any) -> tuple[Any, dict[str
 
 
 def _apply_intensity_variation(image_bgr: Any, rng: Any) -> tuple[Any, dict[str, float]]:
+    """只改变亮度/对比度/噪声/模糊，不改变几何结构，用来测试 SIFT 对光照变化的鲁棒性。"""
+
+    # 这里保留局部导入：OpenCV 属于可选依赖，只在需要模糊处理时才参与执行。
     import cv2
-    import numpy as np
 
     alpha = float(rng.uniform(0.7, 1.35))
     beta = float(rng.uniform(-32.0, 32.0))
@@ -263,8 +285,10 @@ def _apply_intensity_variation(image_bgr: Any, rng: Any) -> tuple[Any, dict[str,
 
 
 def generate_transformed_view(image_bgr: Any, scene_name: str, scene_index: int) -> tuple[Any, Any, str, int, dict[str, float | int | str]]:
+    """根据场景稳定随机地产生一种变换后的右图，并返回对应的真实几何/光照参数。"""
+
+    # 这里保留局部导入：OpenCV 属于可选依赖，仅在真正生成变换图像时需要。
     import cv2
-    import numpy as np
 
     height, width = image_bgr.shape[:2]
     seed, rng = _rng_for_scene(f"transform::{scene_index}::{scene_name}")
@@ -335,6 +359,7 @@ def _repeatable_matches(
 
 
 def validate_results(keypoints_dir: Path, matches_dir: Path, metrics_file: Path, scene_name: str | None = None) -> int:
+    """验证 O2 输出文件是否存在。"""
     print(f"Validating O2 keypoint directory: {keypoints_dir}")
     print(f"Validating O2 match directory: {matches_dir}")
     print(f"Validating O2 metrics file: {metrics_file}")
@@ -438,6 +463,7 @@ def run(
         print("Dry run requested; no outputs were written.")
         return 0
 
+    # 这里保留局部导入：OpenCV 属于可选依赖；只有真正执行 O2 时才要求安装它。
     import cv2
 
     detector = create_sift_detector(config.max_features, config.contrast_threshold)
