@@ -3,8 +3,8 @@
 
 local:
   repo_root: /Users/nemoyu/Desktop/openclaw-operate
-  datasets_root: /Users/nemoyu/Desktop/openclaw-operate/workspace/data
-  middlebury_root: /Users/nemoyu/Desktop/openclaw-operate/workspace/data/middlebury
+  datasets_root: /Users/nemoyu/Desktop/openclaw-operate/data
+  middlebury_root: /Users/nemoyu/Desktop/openclaw-operate/data
 
 remote:
   repo_root: /root/code/new_folder/openclaw-operate
