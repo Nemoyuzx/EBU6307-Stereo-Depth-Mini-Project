@@ -9,8 +9,8 @@ from typing import Any, cast
 
 import numpy as np
 
-from .common import discover_scenes, filter_scene_dirs, load_bgr, load_gray, write_scene_text
-from .config import O2Config
+from common import discover_scenes, filter_scene_dirs, load_bgr, load_gray, write_scene_text
+from config import O2Config
 
 METRIC_FIELDNAMES = [
     "scene",

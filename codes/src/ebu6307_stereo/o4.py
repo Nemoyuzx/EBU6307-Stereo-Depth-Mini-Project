@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from .common import (
+from common import (
     discover_scenes,
     evaluate_disparity,
     filter_scene_dirs,
@@ -17,12 +17,12 @@ from .common import (
     write_png,
     write_scene_text,
 )
-from .config import O3Config, O4Config
-from .o4_dinov2 import (
+from config import O3Config, O4Config
+from o4_dinov2 import (
     extract_dinov2_descriptors,
     resolve_o4_execution_mode,
 )
-from .o3 import (
+from o3 import (
     average_pool_2d,
     average_pool_gray,
     box_filter_sum,
@@ -32,7 +32,7 @@ from .o3 import (
     left_right_consistency_mask,
     median_filter_2d,
 )
-from .o4_torch import (
+from o4_torch import (
     average_pool_2d_torch,
     average_pool_gray_torch,
     build_token_descriptors_torch,
