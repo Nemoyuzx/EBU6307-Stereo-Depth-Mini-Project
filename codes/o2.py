@@ -10,8 +10,8 @@ from typing import Any, cast
 import cv2
 import numpy as np
 
-from .common import discover_scenes, filter_scene_dirs, load_bgr, load_gray, write_scene_text
-from .config import O2Config
+from common import discover_scenes, filter_scene_dirs, load_bgr, load_gray, write_scene_text
+from config import O2Config
 
 METRIC_FIELDNAMES = [
     "scene",
@@ -611,3 +611,9 @@ def run(
     write_metrics(config.metrics_file, metric_rows)
     print(f"Wrote O2 metrics summary: {config.metrics_file}")
     return 0
+
+
+if __name__ == '__main__':
+    from entry_utils import run_objective_entry
+
+    raise SystemExit(run_objective_entry('o2', __file__))

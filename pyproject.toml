@@ -5,11 +5,5 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ebu6307-stereo-bootstrap"
 version = "0.1.0"
-description = "Minimal bootstrap package for the EBU6307 stereo depth mini project"
+description = "Flat codes/ layout for the EBU6307 stereo depth mini project"
 requires-python = ">=3.10"
-
-[tool.setuptools]
-package-dir = {"" = "codes/src"}
-
-[tool.setuptools.packages.find]
-where = ["codes/src"]

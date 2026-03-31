@@ -10,9 +10,9 @@ import numpy as np
 from PIL import Image
 from scipy.ndimage import gaussian_filter
 
-from .common import discover_scenes, ensure_parent, filter_scene_dirs, load_rgb
-from .config import O1Config
-from .pfm import write_pfm
+from common import discover_scenes, ensure_parent, filter_scene_dirs, load_rgb
+from config import O1Config
+from pfm import write_pfm
 
 
 def synthesize_shift(image: Any, shift_pixels: int) -> Any:
@@ -277,3 +277,9 @@ def run(config: O1Config, max_scenes: int | None, dry_run: bool, scene_name: str
     write_metrics(config.metrics_file, metric_rows)
     print(f"Wrote SSIM summary: {config.metrics_file}")
     return 0
+
+
+if __name__ == '__main__':
+    from entry_utils import run_objective_entry
+
+    raise SystemExit(run_objective_entry('o1', __file__))

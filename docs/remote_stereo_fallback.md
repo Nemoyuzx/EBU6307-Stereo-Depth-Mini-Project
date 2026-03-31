@@ -22,7 +22,7 @@ For O1 pipeline validation only, one practical fallback is:
 This repository includes a small standalone extractor for that fallback path:
 
 ```bash
-PYTHONPATH=codes/src python3 -m ebu6307_stereo.fallback_extract \
+python codes/fallback_extract.py \
   --left-video /limx_embop/tos/limx_data/community_dataset_v1/Chojins/chess_game_001_blue_stereo/<left-video-under-observation.image> \
   --right-video /limx_embop/tos/limx_data/community_dataset_v1/Chojins/chess_game_001_blue_stereo/<right-video-under-observation.image2> \
   --output-dir workspace/data/tmp_remote_stereo_fallback \

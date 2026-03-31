@@ -9,7 +9,15 @@ from unittest.mock import patch
 
 import numpy as np
 
-from ebu6307_stereo.o4_dinov2 import (
+import sys
+from pathlib import Path
+
+TESTS_DIR = Path(__file__).resolve().parent
+CODES_DIR = TESTS_DIR.parent
+if str(CODES_DIR) not in sys.path:
+    sys.path.insert(0, str(CODES_DIR))
+
+from o4_dinov2 import (
     _extract_patch_tokens,
     _load_dinov2_model,
     _resolve_dinov2_model_spec,
@@ -128,7 +136,7 @@ class ExtractPatchTokensTests(unittest.TestCase):
 
         model = lambda pixel_values: SimpleNamespace(last_hidden_state=tokens)
         fake_torch = SimpleNamespace(inference_mode=lambda: nullcontext())
-        with patch("ebu6307_stereo.o4_dinov2._require_torch", return_value=fake_torch):
+        with patch("o4_dinov2._require_torch", return_value=fake_torch):
             resolved = _extract_patch_tokens(model, np.zeros((1, 3, 2, 2), dtype=np.float32), expected_tokens=4)
 
         self.assertTrue(np.array_equal(resolved, tokens[:, 2:, :]))
@@ -141,7 +149,7 @@ class ExtractPatchTokensTests(unittest.TestCase):
                 return {"x_norm_patchtokens": tokens}
 
         fake_torch = SimpleNamespace(inference_mode=lambda: nullcontext())
-        with patch("ebu6307_stereo.o4_dinov2._require_torch", return_value=fake_torch):
+        with patch("o4_dinov2._require_torch", return_value=fake_torch):
             resolved = _extract_patch_tokens(FakeModel(), np.zeros((1, 3, 2, 2), dtype=np.float32), expected_tokens=4)
 
         self.assertTrue(np.array_equal(resolved, tokens))
@@ -165,7 +173,7 @@ class LoadDinov2ModelTests(unittest.TestCase):
             (repo_path / "dinov2" / "hub" / "backbones.py").write_text("# test\n", encoding="utf-8")
 
             fake_torch = SimpleNamespace(load=lambda *_args, **_kwargs: {"model": {}})
-            with patch("ebu6307_stereo.o4_dinov2._require_torch", return_value=fake_torch):
+            with patch("o4_dinov2._require_torch", return_value=fake_torch):
                 with patch("importlib.import_module", side_effect=ImportError("missing local dinov2")):
                     with self.assertRaisesRegex(ImportError, "requires a local DINOv2 Python implementation"):
                         _load_dinov2_model("facebook/dinov2-base", checkpoint, "cpu", repo_path=repo_path)

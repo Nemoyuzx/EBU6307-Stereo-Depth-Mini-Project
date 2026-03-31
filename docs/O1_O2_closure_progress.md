@@ -8,7 +8,7 @@
 - Existing remote O1/O2 outputs and CSVs currently include `o4_tiny_scene`, so a clean rerun is still required.
 
 ### Changes prepared locally
-- Tightened `codes/src/ebu6307_stereo/common.py` scene discovery to allow only the official 24 scene names.
+- Tightened `codes/common.py` scene discovery to allow only the official 24 scene names.
 - Explicitly excluded `o4_tiny_scene` and `data` from automatic scene discovery.
 - Next step: sync the patched code to the remote host, clean O1/O2 formal output folders there, rerun O1/O2, then sync the refreshed results back locally.
 

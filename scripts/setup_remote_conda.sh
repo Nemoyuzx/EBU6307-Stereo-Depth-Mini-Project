@@ -15,7 +15,7 @@ fi
 
 mkdir -p "${REMOTE_BASE}"
 mkdir -p "${PROJECT_DIR}"
-mkdir -p "${PROJECT_DIR}/codes/src/ebu6307_stereo"
+mkdir -p "${PROJECT_DIR}/codes"
 mkdir -p "${PROJECT_DIR}/codes/tests"
 mkdir -p "${PROJECT_DIR}/docs"
 mkdir -p "${PROJECT_DIR}/scripts"
