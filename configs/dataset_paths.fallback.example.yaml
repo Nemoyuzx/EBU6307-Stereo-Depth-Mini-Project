@@ -3,14 +3,14 @@
 # Keep fallback inputs and outputs separate from final submission data.
 
 local:
-  repo_root: /Users/nemoyu/Desktop/openclaw-operate
-  datasets_root: /Users/nemoyu/Desktop/openclaw-operate/workspace/data
-  middlebury_root: /Users/nemoyu/Desktop/openclaw-operate/workspace/data/tmp_remote_stereo_fallback
+  repo_root: .
+  datasets_root: workspace/data
+  middlebury_root: workspace/data/tmp_remote_stereo_fallback
 
 remote:
-  repo_root: /root/code/new_folder/openclaw-operate
-  datasets_root: /root/code/new_folder/openclaw-operate/workspace/data
-  middlebury_root: /root/code/new_folder/openclaw-operate/workspace/data/tmp_remote_stereo_fallback
+  repo_root: .
+  datasets_root: workspace/data
+  middlebury_root: workspace/data/tmp_remote_stereo_fallback
 
 results:
   # Keep engineering fallback outputs out of the default assignment result folders.

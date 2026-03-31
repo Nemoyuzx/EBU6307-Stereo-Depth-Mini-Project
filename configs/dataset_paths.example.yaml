@@ -2,14 +2,14 @@
 # Copy to a local untracked config later if needed.
 
 local:
-  repo_root: /Users/nemoyu/Desktop/openclaw-operate
-  datasets_root: /Users/nemoyu/Desktop/openclaw-operate/data
-  middlebury_root: /Users/nemoyu/Desktop/openclaw-operate/data
+  repo_root: .
+  datasets_root: data
+  middlebury_root: data
 
 remote:
-  repo_root: /root/code/new_folder/openclaw-operate
-  datasets_root: /root/code/new_folder/openclaw-operate/workspace/data
-  middlebury_root: /root/code/new_folder/openclaw-operate/workspace/data/middlebury
+  repo_root: .
+  datasets_root: workspace/data
+  middlebury_root: workspace/data/middlebury
 
 results:
   o1b_synthetic_dir: results/O1b_synthetic_data
@@ -71,8 +71,8 @@ o4:
   prefer_cuda: true
   execution_mode: baseline
   dinov2_model_name: facebook/dinov2-base
-  dinov2_repo_path: /path/to/facebookresearch/dinov2
-  dinov2_checkpoint_path: /limx_embop/tos/users/Nemo/self-work/models/dinov2_vitb14_reg4_pretrain.pth
+  dinov2_repo_path: workspace/external/dinov2
+  dinov2_checkpoint_path: workspace/checkpoints/dinov2_vitb14_reg4_pretrain.pth
   model_dim: 48
   encoder_hidden_dim: 96
   encoder_layers: 2
@@ -94,7 +94,7 @@ o4:
 # Recommended O4 local DINOv2 base candidate:
 #   execution_mode: dinov2_cost_volume
 #   dinov2_model_name: facebook/dinov2-base
-#   dinov2_repo_path: /root/code/new_folder/openclaw-operate/workspace/external/dinov2
-#   dinov2_checkpoint_path: /limx_embop/tos/users/Nemo/self-work/models/dinov2_vitb14_reg4_pretrain.pth
+#   dinov2_repo_path: workspace/external/dinov2
+#   dinov2_checkpoint_path: workspace/checkpoints/dinov2_vitb14_reg4_pretrain.pth
 #   disparity_regression: quadratic
 #   max_disparity: 160

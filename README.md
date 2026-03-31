@@ -125,15 +125,14 @@ python codes/o4.py \
   --scene-name chess3 \
   --o4-execution-mode dinov2_cost_volume \
   --o4-dinov2-model facebook/dinov2-base \
-  --o4-dinov2-repo /root/code/new_folder/openclaw-operate/workspace/external/dinov2 \
-  --o4-dinov2-checkpoint /limx_embop/tos/users/Nemo/self-work/models/dinov2_vitb14_reg4_pretrain.pth \
+  --o4-dinov2-repo workspace/external/dinov2 \
+  --o4-dinov2-checkpoint workspace/checkpoints/dinov2_vitb14_reg4_pretrain.pth \
   --o4-regression-mode quadratic
 ```
 
 ## 环境准备
 
 ```bash
-cd /Users/nemoyu/Desktop/openclaw-operate
 conda env create -f environment.yml
 conda activate ebu6307-stereo
 ```
