@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from common import (
+from .common import (
     discover_scenes,
     evaluate_disparity,
     filter_scene_dirs,
@@ -17,9 +17,9 @@ from common import (
     write_png,
     write_scene_text,
 )
-from config import O3Config
-from o2 import _mutual_ratio_matches, _select_geometry_aware_matches, create_sift_detector
-from pfm import read_pfm, write_pfm
+from .config import O3Config
+from .o2 import _mutual_ratio_matches, _select_geometry_aware_matches, create_sift_detector
+from .pfm import read_pfm, write_pfm
 
 
 MetricValue = str | float | int

@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from common import (
+from .common import (
     discover_scenes,
     evaluate_disparity,
     filter_scene_dirs,
@@ -17,8 +17,8 @@ from common import (
     write_png,
     write_scene_text,
 )
-from config import O3Config, O4Config
-from o3 import (
+from .config import O3Config, O4Config
+from .o3 import (
     average_pool_2d,
     average_pool_gray,
     box_filter_sum,
@@ -28,7 +28,7 @@ from o3 import (
     left_right_consistency_mask,
     median_filter_2d,
 )
-from o4_torch import (
+from .o4_torch import (
     average_pool_2d_torch,
     average_pool_gray_torch,
     build_token_descriptors_torch,
@@ -47,7 +47,7 @@ from o4_torch import (
     train_o4_torch_model,
     upsample_token_grid_torch,
 )
-from pfm import read_pfm, write_pfm
+from .pfm import read_pfm, write_pfm
 
 
 MetricValue = str | float | int
@@ -586,7 +586,7 @@ def run(
     scene_fold_map = {scene.name: index % config.num_folds for index, scene in enumerate(discovered_scenes)}
     backend_status = resolve_torch_backend(config.backend, config.device, config.prefer_cuda)
     if str(config.execution_mode).strip().lower() == "dinov2_cost_volume":
-        from o4_dinov2 import resolve_o4_execution_mode
+        from .o4_dinov2 import resolve_o4_execution_mode
 
         execution_status = resolve_o4_execution_mode(
             config.execution_mode,
@@ -685,7 +685,7 @@ def run(
         left_gray = load_gray(scene_dir / "im0.png")
         right_gray = load_gray(scene_dir / "im1.png")
         if execution_status.selected_mode == "dinov2_cost_volume":
-            from o4_dinov2 import extract_dinov2_descriptors
+            from .o4_dinov2 import extract_dinov2_descriptors
 
             try:
                 left_descriptors, _, _, model_patch_size = extract_dinov2_descriptors(

@@ -66,7 +66,24 @@ If remote stereo-video datasets are used as a temporary O1 engineering fallback,
 The verified extraction path for that temporary input source remains documented in [`docs/remote_stereo_fallback.md`](/Users/nemoyu/Desktop/openclaw-operate/docs/remote_stereo_fallback.md).
 The standalone fallback extractor can be invoked without touching the main O1 CLI: `PYTHONPATH=codes/src python3 -m ebu6307_stereo.fallback_extract --left-video ... --right-video ... --output-dir workspace/data/tmp_remote_stereo_fallback`.
 
+For PDF-friendly direct terminal entry, the repository now provides four top-level scripts:
+
+```bash
+python Objective_1.py --dry-run --max-scenes 0
+python Objective_2.py --dry-run --max-scenes 0
+python Objective_3.py --dry-run --max-scenes 0
+python Objective_4.py --dry-run --max-scenes 0
+```
+
+They default to `configs/dataset_paths.example.yaml` with profile `local`, forward common arguments such as `--config`, `--profile`, `--scene-name`, `--max-scenes`, `--dry-run`, and `--validate-results`, and dispatch into the existing `ebu6307_stereo` mainline instead of duplicating logic.
+
 Run the minimal O1 baseline with:
+
+```bash
+python Objective_1.py --dry-run
+```
+
+Equivalent package form:
 
 ```bash
 python -m ebu6307_stereo --config configs/dataset_paths.example.yaml --profile local --dry-run
@@ -77,16 +94,34 @@ Remove `--dry-run` to write O1 outputs into `results/O1b_synthetic_data/` and th
 Run the minimal O2 baseline with:
 
 ```bash
+python Objective_2.py --dry-run
+```
+
+Equivalent package form:
+
+```bash
 python -m ebu6307_stereo --config configs/dataset_paths.example.yaml --profile local --objective o2 --dry-run
 ```
 
 Run the minimal O3 baseline with:
 
 ```bash
+python Objective_3.py --dry-run
+```
+
+Equivalent package form:
+
+```bash
 python -m ebu6307_stereo --config configs/dataset_paths.example.yaml --profile local --objective o3 --dry-run
 ```
 
 Run the minimal O4 baseline with:
+
+```bash
+python Objective_4.py --dry-run
+```
+
+Equivalent package form:
 
 ```bash
 python -m ebu6307_stereo --config configs/dataset_paths.example.yaml --profile local --objective o4 --dry-run

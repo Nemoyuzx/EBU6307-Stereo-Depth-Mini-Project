@@ -9,9 +9,9 @@ from typing import Any
 
 import numpy as np
 
-from common import discover_scenes, ensure_parent, filter_scene_dirs, load_rgb
-from config import O1Config
-from pfm import write_pfm
+from .common import discover_scenes, ensure_parent, filter_scene_dirs, load_rgb
+from .config import O1Config
+from .pfm import write_pfm
 
 
 MetricValue = str | float | int
