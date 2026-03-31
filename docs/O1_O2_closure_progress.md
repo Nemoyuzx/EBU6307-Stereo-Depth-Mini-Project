@@ -1,5 +1,17 @@
 # O1/O2 Closure Progress
 
+## 2026-03-31 Phase 2 - dataset root correction
+
+### What was verified
+- Remote `workspace/data/middlebury` already exists as a symlink to `/limx_embop/tos/users/Nemo/self-work/middlebury_scenes2021/extracted/data`.
+- That linked root contains the 24 required official scene folders plus two extra entries that must be excluded from formal O1/O2 discovery: `o4_tiny_scene` and `data/`.
+- Existing remote O1/O2 outputs and CSVs currently include `o4_tiny_scene`, so a clean rerun is still required.
+
+### Changes prepared locally
+- Tightened `codes/src/ebu6307_stereo/common.py` scene discovery to allow only the official 24 scene names.
+- Explicitly excluded `o4_tiny_scene` and `data` from automatic scene discovery.
+- Next step: sync the patched code to the remote host, clean O1/O2 formal output folders there, rerun O1/O2, then sync the refreshed results back locally.
+
 ## 2026-03-31 Phase 1 - audit and plan
 
 ### What was verified

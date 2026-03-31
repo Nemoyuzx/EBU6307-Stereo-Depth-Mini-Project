@@ -5,12 +5,45 @@ from pathlib import Path
 from typing import Any
 
 
+OFFICIAL_MIDDLEBURY_2021_SCENES = {
+    "artroom1",
+    "artroom2",
+    "bandsaw1",
+    "bandsaw2",
+    "chess1",
+    "chess2",
+    "chess3",
+    "curule1",
+    "curule2",
+    "curule3",
+    "ladder1",
+    "ladder2",
+    "octogons1",
+    "octogons2",
+    "pendulum1",
+    "pendulum2",
+    "podium1",
+    "skates1",
+    "skates2",
+    "skiboots1",
+    "skiboots2",
+    "skiboots3",
+    "traproom1",
+    "traproom2",
+}
+EXCLUDED_DATASET_DIR_NAMES = {"data", "o4_tiny_scene"}
+
+
 def discover_scenes(middlebury_root: Path) -> list[Path]:
     if not middlebury_root.exists():
         return []
 
     scenes: list[Path] = []
     for candidate in sorted(path for path in middlebury_root.iterdir() if path.is_dir()):
+        if candidate.name in EXCLUDED_DATASET_DIR_NAMES:
+            continue
+        if candidate.name not in OFFICIAL_MIDDLEBURY_2021_SCENES:
+            continue
         if (candidate / "im0.png").exists() and (candidate / "im1.png").exists():
             scenes.append(candidate)
     return scenes
