@@ -10,6 +10,7 @@ from typing import Any, cast
 import cv2
 import numpy as np
 
+from entry_utils import run_objective_entry
 from common import discover_scenes, filter_scene_dirs, load_bgr, load_gray, write_scene_text
 from config import O2Config
 
@@ -614,6 +615,6 @@ def run(
 
 
 if __name__ == '__main__':
-    from entry_utils import run_objective_entry
+
 
     raise SystemExit(run_objective_entry('o2', __file__))
