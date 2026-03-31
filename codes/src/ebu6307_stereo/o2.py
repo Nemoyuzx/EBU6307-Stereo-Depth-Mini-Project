@@ -5,7 +5,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -33,15 +33,19 @@ DISTINCT_TRANSFORM_FAMILIES = (
     "intensity",
 )
 
+MetricValue = str | float | int
+MetricRow = dict[str, MetricValue]
+TransformParams = dict[str, MetricValue]
 
-def read_metrics(metrics_file: Path) -> list[dict[str, str]]:
+
+def read_metrics(metrics_file: Path) -> list[MetricRow]:
     """读取 O2 历史指标。"""
     if not metrics_file.exists():
         return []
 
     with metrics_file.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
-        rows: list[dict[str, str]] = []
+        rows: list[MetricRow] = []
         for row in reader:
             if not row.get("scene"):
                 continue
@@ -49,14 +53,14 @@ def read_metrics(metrics_file: Path) -> list[dict[str, str]]:
         return rows
 
 
-def write_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) -> None:
+def write_metrics(metrics_file: Path, rows: list[MetricRow]) -> None:
     """按场景合并并回写 O2 指标。"""
     existing_rows = read_metrics(metrics_file)
     rows_by_scene = {str(row["scene"]): row for row in rows}
-    merged_rows: list[dict[str, str | float | int]] = []
+    merged_rows: list[MetricRow] = []
 
     for row in existing_rows:
-        scene_name = row["scene"]
+        scene_name = str(row["scene"])
         replacement = rows_by_scene.pop(scene_name, None)
         merged_rows.append(replacement if replacement is not None else row)
 
@@ -75,9 +79,10 @@ def create_sift_detector(max_features: int, contrast_threshold: float) -> Any:
     # 这里保留局部导入：OpenCV 属于可选依赖，避免用户仅导入 CLI 或做配置检查时直接失败。
     import cv2
 
-    if not hasattr(cv2, "SIFT_create"):
+    sift_create = cast(Any, getattr(cv2, "SIFT_create", None))
+    if sift_create is None:
         raise RuntimeError("OpenCV SIFT is unavailable in this environment. Install an OpenCV build with SIFT support.")
-    return cv2.SIFT_create(nfeatures=max_features, contrastThreshold=contrast_threshold)
+    return sift_create(nfeatures=max_features, contrastThreshold=contrast_threshold)
 
 
 def draw_keypoints(image_bgr: Any, keypoints: Any) -> Any:
@@ -86,7 +91,8 @@ def draw_keypoints(image_bgr: Any, keypoints: Any) -> Any:
     # 这里保留局部导入：OpenCV 属于可选依赖，只有真正绘图时才需要它。
     import cv2
 
-    return cv2.drawKeypoints(image_bgr, keypoints, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+    draw_keypoints_fn = cast(Any, cv2.drawKeypoints)
+    return draw_keypoints_fn(image_bgr, keypoints, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
 
 
 def _ratio_filtered_matches(knn_matches: Any, ratio_test: float) -> list[Any]:
@@ -127,8 +133,8 @@ def _geometric_inlier_matches(left_keypoints: Any, right_keypoints: Any, matches
     if len(matches) < 8:
         return matches, 0
 
-    left_points = np.float32([left_keypoints[match.queryIdx].pt for match in matches]).reshape(-1, 1, 2)
-    right_points = np.float32([right_keypoints[match.trainIdx].pt for match in matches]).reshape(-1, 1, 2)
+    left_points = np.asarray([left_keypoints[match.queryIdx].pt for match in matches], dtype=np.float32).reshape(-1, 1, 2)
+    right_points = np.asarray([right_keypoints[match.trainIdx].pt for match in matches], dtype=np.float32).reshape(-1, 1, 2)
     fundamental, inlier_mask = cv2.findFundamentalMat(left_points, right_points, cv2.FM_RANSAC, 2.5, 0.99)
     if fundamental is None or inlier_mask is None:
         return matches, 0
@@ -284,7 +290,7 @@ def _apply_intensity_variation(image_bgr: Any, rng: Any) -> tuple[Any, dict[str,
     }
 
 
-def generate_transformed_view(image_bgr: Any, scene_name: str, scene_index: int) -> tuple[Any, Any, str, int, dict[str, float | int | str]]:
+def generate_transformed_view(image_bgr: Any, scene_name: str, scene_index: int) -> tuple[Any, Any, str, int, TransformParams]:
     """根据场景稳定随机地产生一种变换后的右图，并返回对应的真实几何/光照参数。"""
 
     # 这里保留局部导入：OpenCV 属于可选依赖，仅在真正生成变换图像时需要。
@@ -309,7 +315,7 @@ def generate_transformed_view(image_bgr: Any, scene_name: str, scene_index: int)
             flags=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_REFLECT101,
         )
-        params = {
+        params: TransformParams = {
             "family": family,
             "angle_deg": angle_deg,
             "scale": scale,
@@ -319,7 +325,7 @@ def generate_transformed_view(image_bgr: Any, scene_name: str, scene_index: int)
         return transformed, homography, family, seed, params
 
     if family == "affine":
-        homography, params = _affine_homography(width, height, rng)
+        homography, affine_params = _affine_homography(width, height, rng)
         transformed = cv2.warpPerspective(
             image_bgr,
             homography,
@@ -327,12 +333,27 @@ def generate_transformed_view(image_bgr: Any, scene_name: str, scene_index: int)
             flags=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_REFLECT101,
         )
-        params["family"] = family
+        params: TransformParams = {
+            "family": family,
+            "angle_deg": affine_params["angle_deg"],
+            "scale": affine_params["scale"],
+            "shear_x": affine_params["shear_x"],
+            "shear_y": affine_params["shear_y"],
+            "tx_px": affine_params["tx_px"],
+            "ty_px": affine_params["ty_px"],
+        }
         return transformed, homography, family, seed, params
 
-    transformed, params = _apply_intensity_variation(image_bgr, rng)
+    transformed, intensity_params = _apply_intensity_variation(image_bgr, rng)
     homography = np.eye(3, dtype=np.float32)
-    params["family"] = family
+    params: TransformParams = {
+        "family": family,
+        "alpha": intensity_params["alpha"],
+        "beta": intensity_params["beta"],
+        "gamma": intensity_params["gamma"],
+        "noise_sigma": intensity_params["noise_sigma"],
+        "blur_kernel": intensity_params["blur_kernel"],
+    }
     return transformed, homography, family, seed, params
 
 
@@ -539,7 +560,8 @@ def run(
         )
 
         draw_count = min(len(repeatable_matches), config.max_draw_matches)
-        match_image = cv2.drawMatches(
+        draw_matches_fn = cast(Any, cv2.drawMatches)
+        match_image = draw_matches_fn(
             original_bgr,
             original_keypoints,
             transformed_bgr,

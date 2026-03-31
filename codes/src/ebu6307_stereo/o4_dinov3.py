@@ -271,13 +271,16 @@ def _extract_patch_tokens(model: Any, pixel_values: Any, expected_tokens: int) -
     if isinstance(outputs, dict):
         for key in ("x_norm_patchtokens", "patchtokens", "x_patchtokens", "last_hidden_state"):
             value = outputs.get(key)
-            if hasattr(value, "shape"):
+            if value is not None and hasattr(value, "shape"):
                 tokens = value
                 break
         else:
             raise ValueError(f"Unsupported DINOv3 forward_features output keys: {sorted(outputs)}")
     else:
         tokens = outputs
+
+    if tokens is None:
+        raise ValueError("DINOv3 model returned no patch tokens")
 
     if getattr(tokens, "ndim", 0) != 3:
         raise ValueError(f"Unexpected DINOv3 token tensor rank: {getattr(tokens, 'ndim', 'unknown')}")

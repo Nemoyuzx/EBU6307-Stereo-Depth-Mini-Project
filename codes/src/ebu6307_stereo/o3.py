@@ -22,7 +22,11 @@ from .o2 import _mutual_ratio_matches, _select_geometry_aware_matches, create_si
 from .pfm import read_pfm, write_pfm
 
 
-def read_metrics(metrics_file: Path) -> list[dict[str, str]]:
+MetricValue = str | float | int
+MetricRow = dict[str, MetricValue]
+
+
+def read_metrics(metrics_file: Path) -> list[MetricRow]:
     """读取 O3 历史指标。"""
     if not metrics_file.exists():
         return []
@@ -43,14 +47,14 @@ def read_metrics(metrics_file: Path) -> list[dict[str, str]]:
         ]
 
 
-def write_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) -> None:
+def write_metrics(metrics_file: Path, rows: list[MetricRow]) -> None:
     """按场景合并并回写 O3 指标。"""
     existing_rows = read_metrics(metrics_file)
     rows_by_scene = {str(row["scene"]): row for row in rows}
-    merged_rows: list[dict[str, str | float | int]] = []
+    merged_rows: list[MetricRow] = []
 
     for row in existing_rows:
-        scene_name = row["scene"]
+        scene_name = str(row["scene"])
         replacement = rows_by_scene.pop(scene_name, None)
         merged_rows.append(replacement if replacement is not None else row)
 

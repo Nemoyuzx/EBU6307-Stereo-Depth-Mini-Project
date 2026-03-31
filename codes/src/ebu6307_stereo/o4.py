@@ -54,6 +54,10 @@ from .o4_torch import (
 from .pfm import read_pfm, write_pfm
 
 
+MetricValue = str | float | int
+MetricRow = dict[str, MetricValue]
+
+
 @dataclass
 class O4ModelState:
     backend: str
@@ -63,7 +67,7 @@ class O4ModelState:
     torch_model: Any | None = None
 
 
-def read_metrics(metrics_file: Path) -> list[dict[str, str]]:
+def read_metrics(metrics_file: Path) -> list[MetricRow]:
     """读取 O4 历史指标。"""
     if not metrics_file.exists():
         return []
@@ -88,14 +92,14 @@ def read_metrics(metrics_file: Path) -> list[dict[str, str]]:
         ]
 
 
-def write_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) -> None:
+def write_metrics(metrics_file: Path, rows: list[MetricRow]) -> None:
     """按场景合并并回写 O4 场景级指标。"""
     existing_rows = read_metrics(metrics_file)
     rows_by_scene = {str(row["scene"]): row for row in rows}
-    merged_rows: list[dict[str, str | float | int]] = []
+    merged_rows: list[MetricRow] = []
 
     for row in existing_rows:
-        scene_name = row["scene"]
+        scene_name = str(row["scene"])
         replacement = rows_by_scene.pop(scene_name, None)
         merged_rows.append(replacement if replacement is not None else row)
 
@@ -122,7 +126,7 @@ def write_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) 
         writer.writerows(merged_rows)
 
 
-def write_fold_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) -> None:
+def write_fold_metrics(metrics_file: Path, rows: list[MetricRow]) -> None:
     """写出按交叉验证 fold 汇总的统计表。"""
     metrics_file.parent.mkdir(parents=True, exist_ok=True)
     with metrics_file.open("w", encoding="utf-8", newline="") as handle:
@@ -797,7 +801,12 @@ def run(
         disparity_dir=config.disparity_dir,
         analysis_dir=config.analysis_dir,
         metrics_file=config.metrics_file,
+        max_features=800,
+        contrast_threshold=0.04,
+        ratio_test=0.8,
+        max_draw_matches=80,
         num_disparities=max(16, ((config.max_disparity + 15) // 16) * 16),
+        max_vertical_offset=2.0,
         block_size=7,
         uniqueness_ratio=6,
         speckle_window_size=0,
@@ -811,7 +820,7 @@ def run(
         fill_invalid_passes=1,
     )
 
-    metric_rows: list[dict[str, str | int | float]] = []
+    metric_rows: list[MetricRow] = []
     for scene_dir in scenes:
         payload = next(item for item in scene_payloads if item["scene_name"] == scene_dir.name)
         if execution_status.selected_mode == "baseline":

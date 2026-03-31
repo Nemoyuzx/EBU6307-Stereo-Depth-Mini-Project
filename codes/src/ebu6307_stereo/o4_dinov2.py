@@ -385,6 +385,9 @@ def _extract_patch_tokens(model: Any, pixel_values: Any, expected_tokens: int) -
     else:
         tokens = getattr(outputs, "last_hidden_state", outputs)
 
+    if tokens is None:
+        raise ValueError("DINOv2 model returned no patch tokens")
+
     if getattr(tokens, "ndim", 0) != 3:
         raise ValueError(f"Unexpected DINOv2 token tensor rank: {getattr(tokens, 'ndim', 'unknown')}")
 

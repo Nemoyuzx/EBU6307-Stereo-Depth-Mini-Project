@@ -8,9 +8,13 @@ from typing import Any
 
 import numpy as np
 
-from .common import discover_scenes, ensure_parent, filter_scene_dirs, load_rgb
-from .config import O1Config
-from .pfm import write_pfm
+from common import discover_scenes, ensure_parent, filter_scene_dirs, load_rgb
+from config import O1Config
+from pfm import write_pfm
+
+
+MetricValue = str | float | int
+MetricRow = dict[str, MetricValue]
 
 
 def synthesize_shift(image: Any, shift_pixels: int) -> Any:
@@ -88,7 +92,7 @@ def compute_ssim(left_image: Any, synthetic_image: Any) -> float:
     return float(np.mean(channel_scores))
 
 
-def read_metrics(metrics_file: Path) -> list[dict[str, str]]:
+def read_metrics(metrics_file: Path) -> list[MetricRow]:
     """读取历史 SSIM 指标，便于增量更新同一个 CSV。"""
     if not metrics_file.exists():
         return []
@@ -111,14 +115,14 @@ def copy_if_exists(source: Path, destination: Path) -> bool:
     return True
 
 
-def write_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) -> None:
+def write_metrics(metrics_file: Path, rows: list[MetricRow]) -> None:
     """按 scene 合并新旧 SSIM 指标，避免重复追加同一场景。"""
     existing_rows = read_metrics(metrics_file)
     rows_by_scene = {str(row["scene"]): row for row in rows}
-    merged_rows: list[dict[str, str | float | int]] = []
+    merged_rows: list[MetricRow] = []
 
     for row in existing_rows:
-        scene_name = row["scene"]
+        scene_name = str(row["scene"])
         replacement = rows_by_scene.pop(scene_name, None)
         merged_rows.append(replacement if replacement is not None else row)
 

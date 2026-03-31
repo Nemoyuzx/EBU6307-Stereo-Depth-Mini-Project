@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .o4_dinov2 import resolve_dinov2_checkpoint_path
+from o4_dinov2 import resolve_dinov2_checkpoint_path
 
 
 @dataclass(frozen=True)
