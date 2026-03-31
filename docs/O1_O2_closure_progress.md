@@ -12,6 +12,26 @@
 - Explicitly excluded `o4_tiny_scene` and `data` from automatic scene discovery.
 - Next step: sync the patched code to the remote host, clean O1/O2 formal output folders there, rerun O1/O2, then sync the refreshed results back locally.
 
+## 2026-03-31 Phase 3 - O2 constraint rewrite
+
+### New hard constraints received from user
+- O2 must compute SIFT on the original dataset image first, then apply a randomly generated transformation/warping, then evaluate repeatability on the transformed image.
+- O2 repeatability must measure whether the same SIFT features remain consistent under transformation; plain left/right stereo matching is no longer acceptable as the final O2 definition.
+- The three O2 example groups must be clearly different in dominant transformation type.
+- Allowed transformation families include affine / scaling / rotation / intensity variation, but every example group must show a dominant qualitative difference.
+- All transformation parameters must be randomly generated, not hand-fixed.
+- Final code and output naming must remain executable and PDF-compatible.
+
+### Implementation changes in progress
+- Replaced the old O2 left/right stereo matching interpretation with an original-image repeatability pipeline.
+- New O2 flow: detect SIFT on original `im0.png` → generate a scene-specific random transform → detect SIFT on the transformed image → keep only descriptor matches that are consistent with the known random transform geometry/intensity case → compute repeatability from repeatable matches.
+- Each scene now stores its transform family, random seed, and random parameter JSON in both metrics and per-scene README files.
+- `scripts/prepare_o1_o2_submission_assets.py` is being updated to export the PDF-named `Reapitability.csv` from the new O2 metric schema and to force the three examples to come from distinct dominant transform families when available.
+
+### Required rerun
+- The previously generated O2 results are now obsolete under the updated definition and must be discarded/replaced.
+- After the code sync, rerun remote O2 formally on the 24 official scenes and regenerate O2 examples/CSV exports.
+
 ## 2026-03-31 Phase 1 - audit and plan
 
 ### What was verified

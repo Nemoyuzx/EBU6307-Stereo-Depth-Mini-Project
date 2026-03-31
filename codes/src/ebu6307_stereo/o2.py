@@ -1,12 +1,35 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
 import sys
 from pathlib import Path
 from typing import Any
 
 from .common import discover_scenes, filter_scene_dirs, load_bgr, load_gray, write_scene_text
 from .config import O2Config
+
+METRIC_FIELDNAMES = [
+    "scene",
+    "transform_family",
+    "random_seed",
+    "left_keypoints",
+    "right_keypoints",
+    "raw_knn_matches",
+    "ratio_test_matches",
+    "repeatable_matches",
+    "repeatability",
+    "repeatability_proxy",
+    "homography_threshold_px",
+    "transform_params_json",
+]
+
+DISTINCT_TRANSFORM_FAMILIES = (
+    "rotation",
+    "affine",
+    "intensity",
+)
 
 
 def read_metrics(metrics_file: Path) -> list[dict[str, str]]:
@@ -15,18 +38,12 @@ def read_metrics(metrics_file: Path) -> list[dict[str, str]]:
 
     with metrics_file.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
-        return [
-            {
-                "scene": row.get("scene", ""),
-                "left_keypoints": row.get("left_keypoints", ""),
-                "right_keypoints": row.get("right_keypoints", ""),
-                "raw_knn_matches": row.get("raw_knn_matches", ""),
-                "ratio_test_matches": row.get("ratio_test_matches", ""),
-                "repeatability_proxy": row.get("repeatability_proxy", ""),
-            }
-            for row in reader
-            if row.get("scene")
-        ]
+        rows: list[dict[str, str]] = []
+        for row in reader:
+            if not row.get("scene"):
+                continue
+            rows.append({key: row.get(key, "") for key in METRIC_FIELDNAMES})
+        return rows
 
 
 def write_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) -> None:
@@ -43,17 +60,7 @@ def write_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) 
 
     metrics_file.parent.mkdir(parents=True, exist_ok=True)
     with metrics_file.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=[
-                "scene",
-                "left_keypoints",
-                "right_keypoints",
-                "raw_knn_matches",
-                "ratio_test_matches",
-                "repeatability_proxy",
-            ],
-        )
+        writer = csv.DictWriter(handle, fieldnames=METRIC_FIELDNAMES)
         writer.writeheader()
         writer.writerows(merged_rows)
 
@@ -97,11 +104,7 @@ def _mutual_ratio_matches(left_descriptors: Any, right_descriptors: Any, ratio_t
     return len(forward_knn), forward_ratio, mutual
 
 
-def _geometric_inlier_matches(
-    left_keypoints: Any,
-    right_keypoints: Any,
-    matches: list[Any],
-) -> tuple[list[Any], int]:
+def _geometric_inlier_matches(left_keypoints: Any, right_keypoints: Any, matches: list[Any]) -> tuple[list[Any], int]:
     import cv2
     import numpy as np
 
@@ -110,13 +113,7 @@ def _geometric_inlier_matches(
 
     left_points = np.float32([left_keypoints[match.queryIdx].pt for match in matches]).reshape(-1, 1, 2)
     right_points = np.float32([right_keypoints[match.trainIdx].pt for match in matches]).reshape(-1, 1, 2)
-    fundamental, inlier_mask = cv2.findFundamentalMat(
-        left_points,
-        right_points,
-        cv2.FM_RANSAC,
-        2.5,
-        0.99,
-    )
+    fundamental, inlier_mask = cv2.findFundamentalMat(left_points, right_points, cv2.FM_RANSAC, 2.5, 0.99)
     if fundamental is None or inlier_mask is None:
         return matches, 0
 
@@ -127,12 +124,7 @@ def _geometric_inlier_matches(
     return inliers, int(mask.sum())
 
 
-def _select_geometry_aware_matches(
-    left_keypoints: Any,
-    right_keypoints: Any,
-    ratio_filtered: list[Any],
-    mutual_matches: list[Any],
-) -> tuple[list[Any], int]:
+def _select_geometry_aware_matches(left_keypoints: Any, right_keypoints: Any, ratio_filtered: list[Any], mutual_matches: list[Any]) -> tuple[list[Any], int]:
     candidate_matches = ratio_filtered
     mutual_retention = (len(mutual_matches) / len(ratio_filtered)) if ratio_filtered else 0.0
     if len(mutual_matches) >= 24 and mutual_retention >= 0.75:
@@ -145,6 +137,201 @@ def _select_geometry_aware_matches(
     if len(geometric_matches) >= max(24, int(len(candidate_matches) * 0.5)):
         return geometric_matches, ransac_inliers
     return candidate_matches, ransac_inliers
+
+
+def _project_point(homography: Any, x: float, y: float) -> tuple[float, float] | None:
+    import numpy as np
+
+    point = np.asarray([x, y, 1.0], dtype=np.float64)
+    projected = homography @ point
+    if abs(float(projected[2])) < 1e-8:
+        return None
+    return float(projected[0] / projected[2]), float(projected[1] / projected[2])
+
+
+def _rng_for_scene(scene_name: str) -> tuple[int, Any]:
+    import numpy as np
+
+    seed = int(hashlib.sha256(scene_name.encode("utf-8")).hexdigest()[:16], 16) % (2**32)
+    return seed, np.random.default_rng(seed)
+
+
+def _transform_family(scene_name: str, scene_index: int) -> str:
+    _, rng = _rng_for_scene(f"family::{scene_index}::{scene_name}")
+    return str(rng.choice(DISTINCT_TRANSFORM_FAMILIES))
+
+
+def _rotation_matrix(width: int, height: int, angle_deg: float, scale: float) -> Any:
+    import cv2
+    import numpy as np
+
+    center = (width / 2.0, height / 2.0)
+    affine = cv2.getRotationMatrix2D(center, angle_deg, scale)
+    homography = np.eye(3, dtype=np.float32)
+    homography[:2, :] = affine
+    return homography
+
+
+def _affine_homography(width: int, height: int, rng: Any) -> tuple[Any, dict[str, float]]:
+    import numpy as np
+
+    angle_deg = float(rng.uniform(-16.0, 16.0))
+    scale = float(rng.uniform(0.88, 1.12))
+    shear_x = float(rng.uniform(-0.08, 0.08))
+    shear_y = float(rng.uniform(-0.05, 0.05))
+    tx = float(rng.uniform(-0.06, 0.06) * width)
+    ty = float(rng.uniform(-0.06, 0.06) * height)
+
+    angle = np.deg2rad(angle_deg)
+    rotation = np.array(
+        [
+            [np.cos(angle), -np.sin(angle), 0.0],
+            [np.sin(angle), np.cos(angle), 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    scaling = np.array(
+        [
+            [scale, 0.0, 0.0],
+            [0.0, scale, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    shear = np.array(
+        [
+            [1.0, shear_x, 0.0],
+            [shear_y, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    center_to_origin = np.array(
+        [
+            [1.0, 0.0, -width / 2.0],
+            [0.0, 1.0, -height / 2.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    origin_to_center = np.array(
+        [
+            [1.0, 0.0, width / 2.0 + tx],
+            [0.0, 1.0, height / 2.0 + ty],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    homography = origin_to_center @ shear @ scaling @ rotation @ center_to_origin
+    return homography, {
+        "angle_deg": angle_deg,
+        "scale": scale,
+        "shear_x": shear_x,
+        "shear_y": shear_y,
+        "tx_px": tx,
+        "ty_px": ty,
+    }
+
+
+def _apply_intensity_variation(image_bgr: Any, rng: Any) -> tuple[Any, dict[str, float]]:
+    import cv2
+    import numpy as np
+
+    alpha = float(rng.uniform(0.7, 1.35))
+    beta = float(rng.uniform(-32.0, 32.0))
+    gamma = float(rng.uniform(0.75, 1.35))
+    noise_sigma = float(rng.uniform(0.0, 8.0))
+    blur_kernel = int(rng.choice([0, 3, 5]))
+
+    working = image_bgr.astype(np.float32) / 255.0
+    working = np.clip(working * alpha + beta / 255.0, 0.0, 1.0)
+    working = np.power(working, gamma)
+    if noise_sigma > 0.0:
+        working += rng.normal(0.0, noise_sigma / 255.0, size=working.shape)
+    working = np.clip(working, 0.0, 1.0)
+    transformed = np.rint(working * 255.0).astype(np.uint8)
+    if blur_kernel > 0:
+        transformed = cv2.GaussianBlur(transformed, (blur_kernel, blur_kernel), 0)
+    return transformed, {
+        "alpha": alpha,
+        "beta": beta,
+        "gamma": gamma,
+        "noise_sigma": noise_sigma,
+        "blur_kernel": blur_kernel,
+    }
+
+
+def generate_transformed_view(image_bgr: Any, scene_name: str, scene_index: int) -> tuple[Any, Any, str, int, dict[str, float | int | str]]:
+    import cv2
+    import numpy as np
+
+    height, width = image_bgr.shape[:2]
+    seed, rng = _rng_for_scene(f"transform::{scene_index}::{scene_name}")
+    family = _transform_family(scene_name, scene_index)
+
+    if family == "rotation":
+        angle_deg = float(rng.uniform(-28.0, 28.0))
+        scale = float(rng.uniform(0.82, 1.18))
+        tx = float(rng.uniform(-0.03, 0.03) * width)
+        ty = float(rng.uniform(-0.03, 0.03) * height)
+        homography = _rotation_matrix(width, height, angle_deg, scale)
+        homography[0, 2] += tx
+        homography[1, 2] += ty
+        transformed = cv2.warpPerspective(
+            image_bgr,
+            homography,
+            (width, height),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REFLECT101,
+        )
+        params = {
+            "family": family,
+            "angle_deg": angle_deg,
+            "scale": scale,
+            "tx_px": tx,
+            "ty_px": ty,
+        }
+        return transformed, homography, family, seed, params
+
+    if family == "affine":
+        homography, params = _affine_homography(width, height, rng)
+        transformed = cv2.warpPerspective(
+            image_bgr,
+            homography,
+            (width, height),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REFLECT101,
+        )
+        params["family"] = family
+        return transformed, homography, family, seed, params
+
+    transformed, params = _apply_intensity_variation(image_bgr, rng)
+    homography = np.eye(3, dtype=np.float32)
+    params["family"] = family
+    return transformed, homography, family, seed, params
+
+
+def _repeatable_matches(
+    original_keypoints: Any,
+    transformed_keypoints: Any,
+    ratio_matches: list[Any],
+    homography: Any,
+    threshold_px: float,
+) -> list[Any]:
+    repeatable: list[Any] = []
+    for match in ratio_matches:
+        source = original_keypoints[match.queryIdx].pt
+        target = transformed_keypoints[match.trainIdx].pt
+        projected = _project_point(homography, float(source[0]), float(source[1]))
+        if projected is None:
+            continue
+        dx = projected[0] - float(target[0])
+        dy = projected[1] - float(target[1])
+        if (dx * dx + dy * dy) ** 0.5 <= threshold_px:
+            repeatable.append(match)
+    repeatable.sort(key=lambda item: item.distance)
+    return repeatable
 
 
 def validate_results(keypoints_dir: Path, matches_dir: Path, metrics_file: Path, scene_name: str | None = None) -> int:
@@ -258,65 +445,80 @@ def run(
     config.matches_dir.mkdir(parents=True, exist_ok=True)
 
     metric_rows: list[dict[str, str | int | float]] = []
-    for scene_dir in scenes:
-        left_gray = load_gray(scene_dir / "im0.png")
-        right_gray = load_gray(scene_dir / "im1.png")
-        left_bgr = load_bgr(scene_dir / "im0.png")
-        right_bgr = load_bgr(scene_dir / "im1.png")
+    threshold_px = 4.0
 
-        left_keypoints, left_descriptors = detector.detectAndCompute(left_gray, None)
-        right_keypoints, right_descriptors = detector.detectAndCompute(right_gray, None)
+    for scene_index, scene_dir in enumerate(scenes):
+        original_bgr = load_bgr(scene_dir / "im0.png")
+        original_gray = load_gray(scene_dir / "im0.png")
+        transformed_bgr, homography, transform_family, random_seed, transform_params = generate_transformed_view(
+            original_bgr,
+            scene_dir.name,
+            scene_index,
+        )
+        transformed_gray = cv2.cvtColor(transformed_bgr, cv2.COLOR_BGR2GRAY)
+
+        original_keypoints, original_descriptors = detector.detectAndCompute(original_gray, None)
+        transformed_keypoints, transformed_descriptors = detector.detectAndCompute(transformed_gray, None)
 
         raw_matches = 0
-        ratio_matches = 0
-        mutual_matches = []
-        good_matches = []
-        ransac_inliers = 0
-        effective_ratio_test = float(config.ratio_test)
-        if left_descriptors is not None and right_descriptors is not None and len(left_descriptors) > 0 and len(right_descriptors) > 0:
-            raw_matches, ratio_filtered, mutual_matches = _mutual_ratio_matches(
-                left_descriptors,
-                right_descriptors,
-                effective_ratio_test,
-            )
-            ratio_matches = len(ratio_filtered)
-            good_matches, ransac_inliers = _select_geometry_aware_matches(
-                left_keypoints,
-                right_keypoints,
-                ratio_filtered,
-                mutual_matches,
+        ratio_matches = []
+        repeatable_matches = []
+        if (
+            original_descriptors is not None
+            and transformed_descriptors is not None
+            and len(original_descriptors) > 0
+            and len(transformed_descriptors) > 0
+        ):
+            matcher = cv2.BFMatcher(cv2.NORM_L2)
+            knn_matches = matcher.knnMatch(original_descriptors, transformed_descriptors, k=2)
+            raw_matches = len(knn_matches)
+            ratio_matches = _ratio_filtered_matches(knn_matches, float(config.ratio_test))
+            repeatable_matches = _repeatable_matches(
+                original_keypoints,
+                transformed_keypoints,
+                ratio_matches,
+                homography,
+                threshold_px,
             )
 
-        left_count = len(left_keypoints)
-        right_count = len(right_keypoints)
-        repeatability = float(len(good_matches) / min(left_count, right_count)) if min(left_count, right_count) > 0 else 0.0
+        original_count = len(original_keypoints)
+        transformed_count = len(transformed_keypoints)
+        repeatability = (
+            float(len(repeatable_matches) / min(original_count, transformed_count))
+            if min(original_count, transformed_count) > 0
+            else 0.0
+        )
 
         keypoint_scene_dir = config.keypoints_dir / scene_dir.name
         match_scene_dir = config.matches_dir / scene_dir.name
         keypoint_scene_dir.mkdir(parents=True, exist_ok=True)
         match_scene_dir.mkdir(parents=True, exist_ok=True)
 
-        cv2.imwrite(str(keypoint_scene_dir / "im0_keypoints.png"), draw_keypoints(left_bgr, left_keypoints))
-        cv2.imwrite(str(keypoint_scene_dir / "im1_keypoints.png"), draw_keypoints(right_bgr, right_keypoints))
+        cv2.imwrite(str(keypoint_scene_dir / "im0_keypoints.png"), draw_keypoints(original_bgr, original_keypoints))
+        cv2.imwrite(str(keypoint_scene_dir / "im1_keypoints.png"), draw_keypoints(transformed_bgr, transformed_keypoints))
         write_scene_text(
             keypoint_scene_dir / "README.txt",
             [
                 f"scene: {scene_dir.name}",
-                "generator: O2 SIFT baseline with relaxed ratio, conditional mutual matching, and F-matrix RANSAC",
-                f"im0_keypoints: {left_count}",
-                f"im1_keypoints: {right_count}",
+                "generator: O2 SIFT repeatability baseline on original image plus random transformation",
+                "evaluation_definition: detect SIFT on original image before transformation, detect again after a randomly generated transformation, then keep only descriptor matches consistent with the known random transform",
+                f"transform_family: {transform_family}",
+                f"random_seed: {random_seed}",
+                f"transform_params_json: {json.dumps(transform_params, sort_keys=True)}",
+                f"im0_keypoints: {original_count}",
+                f"im1_keypoints: {transformed_count}",
                 f"max_features: {config.max_features}",
                 f"contrast_threshold: {config.contrast_threshold}",
             ],
         )
 
-        draw_count = min(len(good_matches), config.max_draw_matches)
+        draw_count = min(len(repeatable_matches), config.max_draw_matches)
         match_image = cv2.drawMatches(
-            left_bgr,
-            left_keypoints,
-            right_bgr,
-            right_keypoints,
-            good_matches[:draw_count],
+            original_bgr,
+            original_keypoints,
+            transformed_bgr,
+            transformed_keypoints,
+            repeatable_matches[:draw_count],
             None,
             flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
         )
@@ -325,32 +527,40 @@ def run(
             match_scene_dir / "README.txt",
             [
                 f"scene: {scene_dir.name}",
-                "generator: O2 SIFT baseline with relaxed ratio, conditional mutual matching, and F-matrix RANSAC",
+                "generator: O2 SIFT repeatability baseline on original image plus random transformation",
+                f"transform_family: {transform_family}",
+                f"random_seed: {random_seed}",
+                f"transform_params_json: {json.dumps(transform_params, sort_keys=True)}",
                 f"raw_knn_matches: {raw_matches}",
-                f"ratio_filtered_matches: {ratio_matches}",
-                f"mutual_matches: {len(mutual_matches)}",
-                f"fundamental_inliers: {ransac_inliers if ransac_inliers > 0 else len(good_matches)}",
-                f"ratio_test_matches: {len(good_matches)}",
-                f"ratio_test: {effective_ratio_test}",
+                f"ratio_filtered_matches: {len(ratio_matches)}",
+                f"repeatable_matches: {len(repeatable_matches)}",
+                f"homography_threshold_px: {threshold_px}",
+                f"ratio_test: {config.ratio_test}",
                 f"drawn_matches: {draw_count}",
-                "repeatability_proxy: ratio_test_matches / min(left_keypoints, right_keypoints)",
+                "repeatability: repeatable_matches / min(original_keypoints, transformed_keypoints)",
             ],
         )
 
         metric_rows.append(
             {
                 "scene": scene_dir.name,
-                "left_keypoints": left_count,
-                "right_keypoints": right_count,
+                "transform_family": transform_family,
+                "random_seed": random_seed,
+                "left_keypoints": original_count,
+                "right_keypoints": transformed_count,
                 "raw_knn_matches": raw_matches,
-                "ratio_test_matches": len(good_matches),
+                "ratio_test_matches": len(ratio_matches),
+                "repeatable_matches": len(repeatable_matches),
+                "repeatability": f"{repeatability:.6f}",
                 "repeatability_proxy": f"{repeatability:.6f}",
+                "homography_threshold_px": f"{threshold_px:.2f}",
+                "transform_params_json": json.dumps(transform_params, sort_keys=True),
             }
         )
         print(
             f"Wrote O2 scene: {scene_dir.name} "
-            f"(left={left_count}, right={right_count}, ratio={ratio_matches}, mutual={len(mutual_matches)}, "
-            f"good_matches={len(good_matches)}, repeatability_proxy={repeatability:.6f})"
+            f"(family={transform_family}, seed={random_seed}, original={original_count}, transformed={transformed_count}, "
+            f"ratio={len(ratio_matches)}, repeatable={len(repeatable_matches)}, repeatability={repeatability:.6f})"
         )
 
     write_metrics(config.metrics_file, metric_rows)
