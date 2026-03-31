@@ -3,39 +3,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-
-def _require_torch() -> Any:
-    """按需导入 torch。这里保留函数内导入，是因为 torch 属于重量级可选依赖；仅在真正走 torch/DINO 路径时才需要它。"""
-    import torch
-
-    return torch
+import numpy as np
+import torch
+import torch.nn.functional as F
 
 
 def _as_float_tensor(values: Any, device: str) -> Any:
-    # 这里保留局部导入：仅在把非 tensor 输入转成 tensor 时才需要 numpy。
-    import numpy as np
-
-    torch = _require_torch()
     if torch.is_tensor(values):
         return values.to(device=device, dtype=torch.float32)
     return torch.as_tensor(np.array(values, copy=True), dtype=torch.float32, device=device)
 
 
 def _as_int_tensor(values: Any, device: str, *, dtype: Any) -> Any:
-    # 这里保留局部导入：仅在把非 tensor 输入转成 tensor 时才需要 numpy。
-    import numpy as np
-
-    torch = _require_torch()
     if torch.is_tensor(values):
         return values.to(device=device, dtype=dtype)
     return torch.as_tensor(np.array(values, copy=True), dtype=dtype, device=device)
 
 
 def _box_filter_sum_torch(image: Any, radius: int) -> Any:
-    torch = _require_torch()
-    # 这里保留局部导入：F 只在 torch 路径中使用，避免模块导入阶段强依赖 torch.nn。
-    import torch.nn.functional as F
-
     source = image if image.ndim == 4 else image.unsqueeze(0).unsqueeze(0)
     if radius <= 0:
         return source.squeeze(0).squeeze(0)
@@ -46,8 +31,7 @@ def _box_filter_sum_torch(image: Any, radius: int) -> Any:
 
 
 def _compute_horizontal_gradient_torch(image: Any) -> Any:
-    torch = _require_torch()
-
+    
     source = image if image.ndim == 2 else image.squeeze(0).squeeze(0)
     gradient = torch.zeros_like(source, dtype=torch.float32)
     if source.shape[1] > 1:
@@ -58,8 +42,7 @@ def _compute_horizontal_gradient_torch(image: Any) -> Any:
 
 
 def _shift_2d_tensor(image: Any, disparity: int, target_direction: str, fill_value: float = 0.0) -> Any:
-    torch = _require_torch()
-
+    
     height, width = image.shape
     shifted = torch.full_like(image, float(fill_value))
     if disparity == 0:
@@ -75,8 +58,7 @@ def _shift_2d_tensor(image: Any, disparity: int, target_direction: str, fill_val
 
 
 def _shift_3d_tensor(image: Any, disparity: int, target_direction: str, fill_value: float = 0.0) -> Any:
-    torch = _require_torch()
-
+    
     channels, height, width = image.shape
     shifted = torch.full((channels, height, width), float(fill_value), dtype=image.dtype, device=image.device)
     if disparity == 0:
@@ -92,10 +74,6 @@ def _shift_3d_tensor(image: Any, disparity: int, target_direction: str, fill_val
 
 
 def average_pool_gray_torch(image: Any, factor: int, *, device: str) -> Any:
-    torch = _require_torch()
-    # 这里保留局部导入：F 只在 torch 路径中使用，避免模块导入阶段强依赖 torch.nn。
-    import torch.nn.functional as F
-
     source = _as_float_tensor(image, device)
     if factor <= 1:
         return torch.round(source).to(dtype=torch.uint8)
@@ -108,9 +86,6 @@ def average_pool_gray_torch(image: Any, factor: int, *, device: str) -> Any:
 
 
 def average_pool_2d_torch(image: Any, factor: int, *, device: str) -> Any:
-    # 这里保留局部导入：F 只在 torch 路径中使用，避免模块导入阶段强依赖 torch.nn。
-    import torch.nn.functional as F
-
     source = _as_float_tensor(image, device)
     if factor <= 1:
         return source
@@ -123,9 +98,6 @@ def average_pool_2d_torch(image: Any, factor: int, *, device: str) -> Any:
 
 
 def median_filter_2d_torch(image: Any, kernel_size: int, *, device: str) -> Any:
-    # 这里保留局部导入：F 只在 torch 路径中使用，避免模块导入阶段强依赖 torch.nn。
-    import torch.nn.functional as F
-
     source = _as_float_tensor(image, device)
     if kernel_size <= 1:
         return source
@@ -147,8 +119,7 @@ def upsample_token_grid_torch(token_values: Any, span: int, output_height: int, 
 
 
 def build_token_descriptors_torch(image: Any, patch_size: int, context_window_size: int, *, device: str) -> tuple[Any, int, int]:
-    torch = _require_torch()
-
+    
     source = _as_float_tensor(image, device) / 255.0
     gradient_x = _compute_horizontal_gradient_torch(source)
     gradient_y = _compute_horizontal_gradient_torch(source.transpose(0, 1)).transpose(0, 1)
@@ -177,8 +148,7 @@ def build_token_descriptors_torch(image: Any, patch_size: int, context_window_si
 
 
 def build_token_ground_truth_torch(disparity: Any, token_span: int, token_shape: tuple[int, int], *, device: str) -> Any:
-    torch = _require_torch()
-
+    
     source = _as_float_tensor(disparity, device)
     token_height, token_width = token_shape
     cropped_height = token_height * token_span
@@ -199,8 +169,7 @@ def build_token_ground_truth_torch(disparity: Any, token_span: int, token_shape:
 
 
 def collect_o4_training_samples_torch(scene_payloads: list[dict[str, Any]], eval_fold: int, config: Any, *, device: str) -> tuple[Any, Any]:
-    torch = _require_torch()
-
+    
     max_samples = max(1, int(config.max_training_samples))
     negative_samples = max(1, int(config.negative_samples))
     left_batches: list[Any] = []
@@ -297,8 +266,7 @@ def collect_o4_training_samples_torch(scene_payloads: list[dict[str, Any]], eval
 
 
 def extract_baseline_patch_tokens_torch(image: Any, patch_size: int, *, device: str) -> tuple[Any, int, int]:
-    torch = _require_torch()
-
+    
     source = _as_float_tensor(image, device)
     height, width = source.shape
     token_height = height // patch_size
@@ -315,8 +283,7 @@ def extract_baseline_patch_tokens_torch(image: Any, patch_size: int, *, device: 
 
 
 def refine_token_disparity_torch(best_disparity: Any, all_scores: Any, min_disparity: int, max_disparity: int, *, device: str) -> Any:
-    torch = _require_torch()
-
+    
     refined = _as_float_tensor(best_disparity, device).clone()
     score_volume = _as_float_tensor(all_scores, device)
     if max_disparity <= min_disparity:
@@ -339,8 +306,7 @@ def refine_token_disparity_torch(best_disparity: Any, all_scores: Any, min_dispa
 
 
 def soft_argmax_disparity_torch(all_scores: Any, min_disparity: int, max_disparity: int, temperature: float, *, device: str) -> Any:
-    torch = _require_torch()
-
+    
     scores = _as_float_tensor(all_scores, device)
     if scores.ndim != 3:
         raise ValueError("soft_argmax_disparity_torch expects a 3D score volume.")
@@ -362,8 +328,7 @@ def soft_argmax_disparity_torch(all_scores: Any, min_disparity: int, max_dispari
 
 
 def left_right_consistency_mask_torch(left_disparity: Any, right_disparity: Any, threshold: float, *, device: str) -> Any:
-    torch = _require_torch()
-
+    
     left = _as_float_tensor(left_disparity, device)
     right = _as_float_tensor(right_disparity, device)
     height, width = left.shape
@@ -377,8 +342,7 @@ def left_right_consistency_mask_torch(left_disparity: Any, right_disparity: Any,
 
 
 def _propagate_last_valid(values: Any) -> tuple[Any, Any]:
-    torch = _require_torch()
-
+    
     mask = values > 0
     indices = torch.arange(values.shape[1], device=values.device, dtype=torch.int64).unsqueeze(0).expand_as(values)
     base = torch.zeros_like(indices)
@@ -389,8 +353,7 @@ def _propagate_last_valid(values: Any) -> tuple[Any, Any]:
 
 
 def fill_invalid_disparity_torch(disparity: Any, passes: int, *, device: str) -> Any:
-    torch = _require_torch()
-
+    
     filled = _as_float_tensor(disparity, device).clone()
     if passes <= 0:
         return filled
@@ -414,8 +377,7 @@ def fill_invalid_disparity_torch(disparity: Any, passes: int, *, device: str) ->
 
 
 def compute_block_disparity_torch(left_gray: Any, right_gray: Any, config: Any, *, device: str) -> Any:
-    torch = _require_torch()
-
+    
     left = _as_float_tensor(left_gray, device)
     right = _as_float_tensor(right_gray, device)
     left_gradient = _compute_horizontal_gradient_torch(left)
@@ -440,9 +402,6 @@ def compute_block_disparity_torch(left_gray: Any, right_gray: Any, config: Any, 
             for dy, dx in census_offsets
         ], dim=0)
         if radius > 0:
-            # 这里保留局部导入：F 只在 torch 路径中使用，避免模块导入阶段强依赖 torch.nn。
-            import torch.nn.functional as F
-
             left_census = F.pad(left_census, (radius, radius, radius, radius))
             right_census = F.pad(right_census, (radius, radius, radius, radius))
     else:
@@ -551,7 +510,7 @@ def resolve_torch_backend(
         )
 
     try:
-        import torch
+        _ = torch
     except Exception as exc:
         fallback_reason = f"torch import failed: {exc}"
         if backend_name == "torch":
@@ -617,10 +576,6 @@ def train_o4_torch_model(
     random_seed: int,
     device: str,
 ) -> Any | None:
-    import torch
-    # 这里保留局部导入：F 只在 torch 路径中使用，避免模块导入阶段强依赖 torch.nn。
-    import torch.nn.functional as F
-
     if training_descriptors.size == 0 or candidate_descriptors.size == 0 or epochs <= 0:
         return None
 
@@ -701,8 +656,6 @@ def encode_o4_descriptors_torch(
     device: str,
     return_numpy: bool = True,
 ) -> Any:
-    import torch
-
     source = _as_float_tensor(descriptors, device)
     if source.numel() == 0:
         return source
@@ -733,8 +686,6 @@ def predict_token_disparity_torch(
     target_direction: str = "negative",
     return_numpy: bool = True,
 ) -> tuple[Any, Any, Any]:
-    import torch
-
     left = _as_float_tensor(left_tokens, device)
     right = _as_float_tensor(right_tokens, device)
     token_height, token_width, _ = left.shape

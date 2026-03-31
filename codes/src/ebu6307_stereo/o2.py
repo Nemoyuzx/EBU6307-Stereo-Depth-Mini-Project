@@ -7,10 +7,11 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+import cv2
 import numpy as np
 
-from common import discover_scenes, filter_scene_dirs, load_bgr, load_gray, write_scene_text
-from config import O2Config
+from .common import discover_scenes, filter_scene_dirs, load_bgr, load_gray, write_scene_text
+from .config import O2Config
 
 METRIC_FIELDNAMES = [
     "scene",
@@ -76,22 +77,19 @@ def write_metrics(metrics_file: Path, rows: list[MetricRow]) -> None:
 def create_sift_detector(max_features: int, contrast_threshold: float) -> Any:
     """创建 SIFT 检测器，并在环境不支持 SIFT 时给出明确报错。"""
 
-    # 这里保留局部导入：OpenCV 属于可选依赖，避免用户仅导入 CLI 或做配置检查时直接失败。
-    import cv2
-
     sift_create = cast(Any, getattr(cv2, "SIFT_create", None))
     if sift_create is None:
         raise RuntimeError("OpenCV SIFT is unavailable in this environment. Install an OpenCV build with SIFT support.")
+    # contrastThreshold 对应 SIFT 第 2 步里的低对比度点剔除强度；
+    # nfeatures 则限制最终保留下来的关键点数量，便于控制工程侧开销。
     return sift_create(nfeatures=max_features, contrastThreshold=contrast_threshold)
 
 
 def draw_keypoints(image_bgr: Any, keypoints: Any) -> Any:
     """把关键点以可视化形式画到图像上，便于结果检查。"""
 
-    # 这里保留局部导入：OpenCV 属于可选依赖，只有真正绘图时才需要它。
-    import cv2
-
     draw_keypoints_fn = cast(Any, cv2.drawKeypoints)
+    # 这里画出的圆圈大小和朝向，来自 SIFT 第 2、3 步之后得到的关键点位置、尺度和主方向。
     return draw_keypoints_fn(image_bgr, keypoints, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
 
 
@@ -110,9 +108,6 @@ def _ratio_filtered_matches(knn_matches: Any, ratio_test: float) -> list[Any]:
 def _mutual_ratio_matches(left_descriptors: Any, right_descriptors: Any, ratio_test: float) -> tuple[int, list[Any], list[Any]]:
     """先做双向 KNN+ratio test，再取互为匹配的描述子对，减少偶然误匹配。"""
 
-    # 这里保留局部导入：OpenCV 属于可选依赖，且该函数只在真实匹配阶段调用。
-    import cv2
-
     matcher = cv2.BFMatcher(cv2.NORM_L2)
     forward_knn = matcher.knnMatch(left_descriptors, right_descriptors, k=2)
     backward_knn = matcher.knnMatch(right_descriptors, left_descriptors, k=2)
@@ -126,9 +121,6 @@ def _mutual_ratio_matches(left_descriptors: Any, right_descriptors: Any, ratio_t
 
 def _geometric_inlier_matches(left_keypoints: Any, right_keypoints: Any, matches: list[Any]) -> tuple[list[Any], int]:
     """使用基础矩阵 RANSAC 剔除几何上明显不合理的匹配。"""
-
-    # 这里保留局部导入：OpenCV 属于可选依赖，只有进入几何验证分支时才会使用。
-    import cv2
 
     if len(matches) < 8:
         return matches, 0
@@ -187,9 +179,6 @@ def _transform_family(scene_name: str, scene_index: int) -> str:
 
 def _rotation_matrix(width: int, height: int, angle_deg: float, scale: float) -> Any:
     """构造绕图像中心旋转/缩放的 3x3 单应矩阵。"""
-
-    # 这里保留局部导入：OpenCV 属于可选依赖，仅在构造随机几何变换时才会使用。
-    import cv2
 
     center = (width / 2.0, height / 2.0)
     affine = cv2.getRotationMatrix2D(center, angle_deg, scale)
@@ -263,9 +252,6 @@ def _affine_homography(width: int, height: int, rng: Any) -> tuple[Any, dict[str
 def _apply_intensity_variation(image_bgr: Any, rng: Any) -> tuple[Any, dict[str, float]]:
     """只改变亮度/对比度/噪声/模糊，不改变几何结构，用来测试 SIFT 对光照变化的鲁棒性。"""
 
-    # 这里保留局部导入：OpenCV 属于可选依赖，只在需要模糊处理时才参与执行。
-    import cv2
-
     alpha = float(rng.uniform(0.7, 1.35))
     beta = float(rng.uniform(-32.0, 32.0))
     gamma = float(rng.uniform(0.75, 1.35))
@@ -292,9 +278,6 @@ def _apply_intensity_variation(image_bgr: Any, rng: Any) -> tuple[Any, dict[str,
 
 def generate_transformed_view(image_bgr: Any, scene_name: str, scene_index: int) -> tuple[Any, Any, str, int, TransformParams]:
     """根据场景稳定随机地产生一种变换后的右图，并返回对应的真实几何/光照参数。"""
-
-    # 这里保留局部导入：OpenCV 属于可选依赖，仅在真正生成变换图像时需要。
-    import cv2
 
     height, width = image_bgr.shape[:2]
     seed, rng = _rng_for_scene(f"transform::{scene_index}::{scene_name}")
@@ -484,9 +467,6 @@ def run(
         print("Dry run requested; no outputs were written.")
         return 0
 
-    # 这里保留局部导入：OpenCV 属于可选依赖；只有真正执行 O2 时才要求安装它。
-    import cv2
-
     detector = create_sift_detector(config.max_features, config.contrast_threshold)
     config.keypoints_dir.mkdir(parents=True, exist_ok=True)
     config.matches_dir.mkdir(parents=True, exist_ok=True)
@@ -504,6 +484,11 @@ def run(
         )
         transformed_gray = cv2.cvtColor(transformed_bgr, cv2.COLOR_BGR2GRAY)
 
+        # 这一步在 OpenCV 内部顺序完成 SIFT 的前 4 个标准步骤：
+        # 第 1 步在尺度空间和 DoG 金字塔中找极值候选点；
+        # 第 2 步剔除低对比度点和边缘响应点并做精定位；
+        # 第 3 步为关键点分配主方向；
+        # 第 4 步围绕关键点统计梯度直方图，输出 128 维描述符。
         original_keypoints, original_descriptors = detector.detectAndCompute(original_gray, None)
         transformed_keypoints, transformed_descriptors = detector.detectAndCompute(transformed_gray, None)
 
@@ -516,10 +501,14 @@ def run(
             and len(original_descriptors) > 0
             and len(transformed_descriptors) > 0
         ):
+            # 这里开始不再属于 SIFT 本体，而是对第 4 步产出的描述符做项目级评估。
             matcher = cv2.BFMatcher(cv2.NORM_L2)
+            # 先对 128 维描述符做 KNN 最近邻匹配，建立候选对应关系。
             knn_matches = matcher.knnMatch(original_descriptors, transformed_descriptors, k=2)
             raw_matches = len(knn_matches)
+            # Lowe ratio test 用来剔除“最近邻和次近邻太接近”的歧义匹配。
             ratio_matches = _ratio_filtered_matches(knn_matches, float(config.ratio_test))
+            # 再结合已知随机变换的真实几何关系，筛出真正可重复的关键点对应。
             repeatable_matches = _repeatable_matches(
                 original_keypoints,
                 transformed_keypoints,

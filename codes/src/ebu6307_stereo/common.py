@@ -5,7 +5,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
+from PIL import Image
 
 
 OFFICIAL_MIDDLEBURY_2021_SCENES = {
@@ -63,19 +65,11 @@ def filter_scene_dirs(scene_dirs: list[Path], scene_name: str | None) -> list[Pa
 def load_rgb(path: Path) -> Any:
     """读取 RGB 图像。优先走 Pillow；若环境缺少 Pillow，则退回 macOS 的 sips 转换流程。"""
 
-    try:
-        # Pillow 属于可选依赖：若用户环境未安装，则退回到系统自带 sips，避免整个项目无法运行。
-        from PIL import Image
-
-        return np.asarray(Image.open(path).convert("RGB"))
-    except ImportError:
-        return read_image_with_sips(path)
+    return np.asarray(Image.open(path).convert("RGB"))
 
 
 def load_bgr(path: Path) -> Any:
     """以 OpenCV 默认的 BGR 排列读取彩色图像，供特征提取与匹配流程使用。"""
-    import cv2
-
     image = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if image is None:
         raise FileNotFoundError(f"Could not read image: {path}")
@@ -85,17 +79,10 @@ def load_bgr(path: Path) -> Any:
 def load_gray(path: Path) -> Any:
     """读取灰度图。优先使用 OpenCV；若没有 cv2，则用 RGB 图像按亮度公式手工转灰度。"""
 
-    try:
-        # OpenCV 属于可选依赖：没有它时仍可通过备用路径得到灰度图。
-        import cv2
-
-        image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-        if image is None:
-            raise FileNotFoundError(f"Could not read image: {path}")
-        return image
-    except ImportError:
-        rgb = read_image_with_sips(path)
-        return np.rint(0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]).astype(np.uint8)
+    image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        raise FileNotFoundError(f"Could not read image: {path}")
+    return image
 
 
 def read_image_with_sips(path: Path) -> Any:
@@ -118,24 +105,7 @@ def write_png(path: Path, image: Any) -> None:
     ensure_parent(path)
     image = np.asarray(image, dtype=np.uint8)
 
-    try:
-        # Pillow 属于可选依赖：若用户环境未安装，则退回到系统自带 sips，避免整个项目无法运行。
-        from PIL import Image
-
-        Image.fromarray(image).save(path, format="PNG")
-        return
-    except ImportError:
-        # subprocess 已在文件顶部导入；这里保留注释说明该分支依赖系统 sips，而不是额外 Python 包。
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            bmp_path = Path(tmp_dir) / f"{path.stem}.bmp"
-            write_bmp(bmp_path, image)
-            subprocess.run(
-                ["sips", "-s", "format", "png", str(bmp_path), "--out", str(path)],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+    Image.fromarray(image).save(path, format="PNG")
 
 
 def read_bmp(path: Path) -> Any:

@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from common import (
+from .common import (
     discover_scenes,
     evaluate_disparity,
     filter_scene_dirs,

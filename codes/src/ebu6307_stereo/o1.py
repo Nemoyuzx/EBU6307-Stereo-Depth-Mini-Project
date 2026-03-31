@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from PIL import Image
+from scipy.ndimage import gaussian_filter
 
 from .common import discover_scenes, ensure_parent, filter_scene_dirs, load_rgb
 from .config import O1Config
@@ -48,9 +50,6 @@ def synthesize_disparity(height: int, width: int, shift_pixels: int) -> Any:
 
 def compute_ssim(left_image: Any, synthetic_image: Any) -> float:
     """手工实现一个简化版多通道 SSIM，用于衡量原始左图和合成右图的结构相似性。"""
-
-    # 这里保留局部导入：SciPy 只在真正计算 SSIM 时才需要，避免仅做 dry-run/导入检查时强依赖该可选库。
-    from scipy.ndimage import gaussian_filter
 
     left = np.asarray(left_image, dtype=np.float64)
     right = np.asarray(synthetic_image, dtype=np.float64)
@@ -256,9 +255,6 @@ def run(config: O1Config, max_scenes: int | None, dry_run: bool, scene_name: str
     if dry_run or max_scenes == 0:
         print("Dry run requested; no outputs were written.")
         return 0
-
-    # 这里保留局部导入：Pillow 只在真正写出 im1.png 时需要，避免 CLI 仅导入模块时就要求安装该可选依赖。
-    from PIL import Image
 
     config.synthetic_dir.mkdir(parents=True, exist_ok=True)
     metric_rows: list[dict[str, str | float | int]] = []
