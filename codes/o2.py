@@ -466,8 +466,7 @@ def run(
     dry_run: bool,
     scene_name: str | None,
 ) -> int:
-    # 先做场景发现，再做 scene_name 过滤和 max_scenes 截断。
-    # 这个顺序能保证日志里同时看到“总共发现多少 scene”和“这次实际会处理多少 scene”。
+    # “总共发现多少 scene”“这次实际会处理多少 scene”
     discovered_scenes = discover_scenes(middlebury_root)
     discovered_count = len(discovered_scenes)
     scenes = filter_scene_dirs(discovered_scenes, scene_name)
@@ -479,7 +478,7 @@ def run(
             return 2
         scenes = scenes[:max_scenes]
 
-    # 开跑前把关键路径和输出位置都打印出来，方便用户第一时间确认“读哪里、写哪里、筛了哪些 scene”。
+    # 关键路径和输出位置都打印 读哪里、写哪里、筛了哪些 scene
     print(f"Repository root: {repo_root}")
     print(f"Middlebury root: {middlebury_root}")
     print(f"Discovered scenes with im0.png/im1.png: {discovered_count}")
@@ -490,9 +489,9 @@ def run(
         print(f"Scene filter: {scene_name}")
     print("Scenes to process: " + ", ".join(scene.name for scene in scenes) if scenes else "Scenes to process: none")
 
+    #判定数据集指定目录是否存在
     if not middlebury_root.exists():
-        # dry-run / discovery-only 模式下，数据目录还没准备好不算硬错误；
-        # 这时用户往往只是想确认配置有没有指到预期位置。
+        # dry-run / discovery-only 模式下，跳过检查
         if dry_run or max_scenes == 0:
             print("Middlebury root does not exist yet. Discovery-only mode completed without processing.")
             return 0
@@ -503,9 +502,9 @@ def run(
         )
         return 1
 
+    # 目录存在但没有任何合法 scene 时
     if discovered_count == 0:
-        # 目录存在但没有任何合法 scene 时，同样允许 dry-run 成功退出；
-        # 真正要写结果时再把它视为需要修复的数据问题。
+        # dry-run / discovery-only 模式下，跳过检查
         if dry_run or max_scenes == 0:
             print("No valid scenes found. Discovery-only mode completed without processing.")
             return 0
@@ -516,6 +515,7 @@ def run(
         )
         return 1
 
+    # 指定的 scene_name 不存在
     if scene_name is not None and not scenes:
         print(f"No discovered scenes matched --scene-name {scene_name!r} under {middlebury_root}.", file=sys.stderr)
         return 1
