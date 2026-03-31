@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from o4_dinov2 import resolve_dinov2_checkpoint_path
+from .o4_dinov2 import resolve_dinov2_checkpoint_path
 
 
 @dataclass(frozen=True)
@@ -14,6 +14,11 @@ class O1Config:
     synthetic_dir: Path
     metrics_file: Path
     shift_pixels: int
+    method: str
+    superpixel_count: int
+    superpixel_cluster_count: int
+    device: str
+    output_tag: str
 
 
 @dataclass(frozen=True)
@@ -127,6 +132,15 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
     synthetic_value = result_block.get("o1_synthetic_dir") or result_block.get("o1b_synthetic_dir") or "results/O1b_synthetic_data"
     metrics_value = result_block.get("o1_metrics_file") or result_block.get("o1c_metrics_file") or "results/O1c_synthetic_data/SSIM.csv"
     shift_pixels = int(o1_block.get("shift_pixels", 8))
+    o1_method = str(o1_block.get("method", "shift")).strip().lower() or "shift"
+    if o1_method not in {"shift", "superpixel_kmeans"}:
+        raise ValueError("o1.method must be one of: shift, superpixel_kmeans")
+    o1_superpixel_count = max(1, int(o1_block.get("superpixel_count", 400)))
+    o1_superpixel_cluster_count = max(1, int(o1_block.get("superpixel_cluster_count", 12)))
+    o1_device = str(o1_block.get("device", "auto")).strip().lower() or "auto"
+    if o1_device not in {"auto", "cuda", "cpu"}:
+        raise ValueError("o1.device must be one of: auto, cuda, cpu")
+    o1_output_tag = str(o1_block.get("output_tag", "")).strip()
 
     keypoints_value = result_block.get("o2a_sift_dir") or "results/O2a_sift"
     matches_value = result_block.get("o2b_sift_dir") or "results/O2b_sift"
@@ -238,6 +252,11 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
             synthetic_dir=resolve_path(repo_root, synthetic_value),
             metrics_file=resolve_path(repo_root, metrics_value),
             shift_pixels=shift_pixels,
+            method=o1_method,
+            superpixel_count=o1_superpixel_count,
+            superpixel_cluster_count=o1_superpixel_cluster_count,
+            device=o1_device,
+            output_tag=o1_output_tag,
         ),
         o2=O2Config(
             keypoints_dir=resolve_path(repo_root, keypoints_value),
