@@ -147,19 +147,19 @@ class ManualSiftDetectorTests(unittest.TestCase):
         self.assertEqual(descriptors.shape[1], 128)
         self.assertLessEqual(len(keypoints), 64)
 
-    def test_descriptor_trilinear_interpolation_spreads_vote_across_neighbors(self) -> None:
+    def test_descriptor_accumulates_into_single_4x4_block_histogram_bin(self) -> None:
         detector = create_sift_detector(max_features=64, contrast_threshold=0.04)
 
         magnitude = np.zeros((40, 40), dtype=np.float32)
         orientation = np.zeros((40, 40), dtype=np.float32)
-        magnitude[17, 19] = 1.0
-        orientation[17, 19] = 22.5
+        magnitude[18, 18] = 1.0
+        orientation[18, 18] = 0.0
 
         descriptor = detector._build_descriptor(magnitude, orientation, x=16.0, y=16.0, sigma=1.6, angle=0.0)
 
         self.assertIsNotNone(descriptor)
         assert descriptor is not None
-        self.assertEqual(int(np.count_nonzero(descriptor > 1e-6)), 8)
+        self.assertEqual(int(np.count_nonzero(descriptor > 1e-6)), 1)
 
     def test_shifted_view_produces_mutual_ratio_matches(self) -> None:
         detector = create_sift_detector(max_features=96, contrast_threshold=0.04)

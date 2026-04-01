@@ -90,6 +90,10 @@ class ManualSiftDetector:
         self.orientation_magnitude_ratio = 0.1  # 方向分配时丢弃过弱梯度，降低噪声方向对直方图的扰动。
         self.orientation_window_size = 16  # 方向分配固定使用16x16窗口，对齐课件里的方向直方图统计区域。
         self.orientation_block_size = 2  # 方向分配先把16x16窗口切成2x2小块，再为每个小块计算一个聚合梯度方向。
+        self.descriptor_window_size = 16.0  # 描述子在主方向和尺度归一化后固定映射到16x16窗口。
+        self.descriptor_block_count = 4  # 16x16窗口切成4x4个子区域。
+        self.descriptor_orientation_bins = 8  # 每个4x4子区域统计8个方向bin。
+        self.descriptor_clip_value = 0.2  # 第一次归一化后把过大的bin截断到0.2，抑制局部强梯度主导描述子。
 
     def detectAndCompute(self, image: Any, mask: Any) -> tuple[list[ManualKeypoint], np.ndarray | None]:
 
@@ -454,8 +458,7 @@ class ManualSiftDetector:
 
     def _assign_orientations(self, magnitude: np.ndarray, orientation: np.ndarray, x: float, y: float, sigma: float,
     ) -> list[float]:
-        """ 第三步：方向分配。
-        这里按课件里的教学流程来做：
+        """ 第三步：方向分配。 opencv 使用GLOH
         1. 固定取关键点周围的16x16窗口；
         2. 把窗口切成2x2小块，为每个小块先聚合出一个梯度方向和梯度强度；
         3. 丢弃过弱的小块梯度，避免弱纹理和噪声扰动主方向；
@@ -516,19 +519,12 @@ class ManualSiftDetector:
         histogram = self._smooth_circular_histogram(histogram, passes=4)
         return self._extract_orientation_peaks(histogram, peak_ratio=0.8)
 
-    def _compute_block_gradient_vote(
-        self,
-        magnitude: np.ndarray,
-        orientation: np.ndarray,
-        start_x: int,
-        start_y: int,
-        block_size: int,
-    ) -> tuple[float, float] | None:
+    def _compute_block_gradient_vote(self, magnitude: np.ndarray, orientation: np.ndarray, start_x: int, start_y: int, block_size: int) -> tuple[float, float] | None:
         block_magnitude = magnitude[start_y : start_y + block_size, start_x : start_x + block_size]
         block_orientation = orientation[start_y : start_y + block_size, start_x : start_x + block_size]
         if block_magnitude.size == 0:
             return None
-
+        # 先把 block 内所有像素的梯度向量按角度分解成 x 和 y 分量，再求和得到 block 的整体梯度向量，最后从整体梯度向量计算出一个代表性的幅值和方向
         block_orientation_rad = np.deg2rad(block_orientation)
         grad_x = float(np.sum(block_magnitude * np.cos(block_orientation_rad)))
         grad_y = float(np.sum(block_magnitude * np.sin(block_orientation_rad)))
@@ -566,15 +562,16 @@ class ManualSiftDetector:
 
     def _build_descriptor(self, magnitude: np.ndarray, orientation: np.ndarray, x: float, y: float, sigma: float, angle: float ) -> np.ndarray | None:
         """ 第四步：关键点描述子生成。
-        先把邻域坐标系旋转到关键点主方向上，这是旋转不变性的核心。
-        然后取近似 16x16 的窗口，划成 4x4 个子区域；每个子区域统计 8 个方向 bin，
-        最终得到 4*4*8=128 维描述子。
-        
-        标准 SIFT 会把每个梯度样本按空间 x、空间 y、方向 bin 三个维度做三线性插值，
-        让落在边界附近的样本平滑分摊到相邻子区域和相邻方向柱里，减少硬分桶带来的量化噪声。
-        当前实现这里已按 2x2x2 共 8 个邻近单元分配，同时保留高斯加权、L2 归一化、0.2 截断、再次归一化。 """
+        1. 先按关键点的主方向和尺度把邻域归一化到16x16窗口。
+        2. 再把这个16x16窗口切成4x4个子区域，每个子区域统计8个方向bin。
+        3. 梯度幅值先乘一个高斯权重，方差取半个窗口宽度，让中心区域平滑地主导描述子。
+        4. 最后把4x4x8拼成128维向量，做L2归一化、0.2截断，再次归一化。"""
         sigma_safe = max(1.0, sigma)
-        radius = max(8, int(round(8.0 * sigma_safe)))
+        half_window = self.descriptor_window_size / 2.0
+        block_size = self.descriptor_window_size / float(self.descriptor_block_count)
+        orientation_bin_width = 360.0 / float(self.descriptor_orientation_bins)
+        gaussian_variance = self.descriptor_window_size / 2.0
+        radius = max(8, int(round(half_window * sigma_safe)))
         min_y = int(math.floor(y - radius))
         max_y = int(math.ceil(y + radius))
         min_x = int(math.floor(x - radius))
@@ -587,7 +584,10 @@ class ManualSiftDetector:
         ):
             return None
 
-        descriptor = np.zeros((4, 4, 8), dtype=np.float32)
+        descriptor = np.zeros(
+            (self.descriptor_block_count, self.descriptor_block_count, self.descriptor_orientation_bins),
+            dtype=np.float32,
+        )
         angle_rad = math.radians(angle)
         cos_angle = math.cos(angle_rad)
         sin_angle = math.sin(angle_rad)
@@ -596,44 +596,30 @@ class ManualSiftDetector:
             for xx in range(min_x, max_x + 1):
                 dx = float(xx - x)
                 dy = float(yy - y)
-                # 把局部坐标旋转到主方向参考系，这样同一结构旋转后仍会落到相近的描述子布局里。
+                # 先按主方向旋转，再按 sigma 归一化，把邻域统一映射到固定的16x16描述子窗口里。
                 rotated_x = (cos_angle * dx + sin_angle * dy) / sigma_safe
                 rotated_y = (-sin_angle * dx + cos_angle * dy) / sigma_safe
-                if abs(rotated_x) >= 8.0 or abs(rotated_y) >= 8.0:  # 16x16 square window
+                if abs(rotated_x) >= half_window or abs(rotated_y) >= half_window:
                     continue
-                spatial_x = (rotated_x / 4.0) + 1.5
-                spatial_y = (rotated_y / 4.0) + 1.5
-                if spatial_x <= -1.0 or spatial_x >= 4.0 or spatial_y <= -1.0 or spatial_y >= 4.0:
+                block_x = int((rotated_x + half_window) // block_size)
+                block_y = int((rotated_y + half_window) // block_size)
+                if (
+                    block_x < 0
+                    or block_x >= self.descriptor_block_count
+                    or block_y < 0
+                    or block_y >= self.descriptor_block_count
+                ):
                     continue
                 relative_angle = (float(orientation[yy, xx]) - angle) % 360.0
-                orientation_bin = relative_angle / 45.0
-                # 描述子阶段也继续使用高斯权重，让靠近关键点中心的局部结构贡献更大。
-                sample_weight = math.exp(-(rotated_x * rotated_x + rotated_y * rotated_y) / 64.0) * float(magnitude[yy, xx])
+                orientation_bin = int(relative_angle // orientation_bin_width) % self.descriptor_orientation_bins
+                # 描述子阶段按“半个窗口宽度”的方差做高斯加权，让中心区域更稳定、边缘逐渐衰减。
+                gaussian_weight = math.exp(
+                    -(rotated_x * rotated_x + rotated_y * rotated_y) / (2.0 * gaussian_variance)
+                )
+                sample_weight = gaussian_weight * float(magnitude[yy, xx])
                 if sample_weight <= 1e-8:
                     continue
-
-                base_x = int(math.floor(spatial_x))
-                base_y = int(math.floor(spatial_y))
-                base_orientation = int(math.floor(orientation_bin))
-                frac_x = spatial_x - base_x
-                frac_y = spatial_y - base_y
-                frac_orientation = orientation_bin - base_orientation
-
-                for y_offset in range(2):
-                    cell_y = base_y + y_offset
-                    if cell_y < 0 or cell_y >= 4:
-                        continue
-                    weight_y = (1.0 - frac_y) if y_offset == 0 else frac_y
-                    for x_offset in range(2):
-                        cell_x = base_x + x_offset
-                        if cell_x < 0 or cell_x >= 4:
-                            continue
-                        weight_x = (1.0 - frac_x) if x_offset == 0 else frac_x
-                        spatial_weight = sample_weight * weight_y * weight_x
-                        for orientation_offset in range(2):
-                            cell_orientation = (base_orientation + orientation_offset) % 8
-                            weight_orientation = (1.0 - frac_orientation) if orientation_offset == 0 else frac_orientation
-                            descriptor[cell_y, cell_x, cell_orientation] += spatial_weight * weight_orientation
+                descriptor[block_y, block_x, orientation_bin] += sample_weight
 
         vector = descriptor.reshape(-1)
         norm = float(np.linalg.norm(vector))
@@ -641,7 +627,7 @@ class ManualSiftDetector:
             return None
         # 第一次 L2 归一化抵消整体光照缩放；0.2 截断再归一化用于抑制局部过亮或饱和区域。
         vector = vector / norm
-        vector = np.clip(vector, 0.0, 0.2)
+        vector = np.clip(vector, 0.0, self.descriptor_clip_value)
         renorm = float(np.linalg.norm(vector))
         if renorm < 1e-8:
             return None
