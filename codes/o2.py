@@ -1066,13 +1066,7 @@ def generate_transformed_view(image_bgr: Any, scene_name: str, scene_index: int)
     return transformed, homography, family, seed, params
 
 
-def _repeatable_matches(
-    original_keypoints: Any,
-    transformed_keypoints: Any,
-    ratio_matches: list[Any],
-    homography: Any,
-    threshold_px: float,
-) -> list[Any]:
+def _repeatable_matches(original_keypoints: Any, transformed_keypoints: Any, ratio_matches: list[Any], homography: Any, threshold_px: float) -> list[Any]:
     repeatable: list[Any] = []
     for match in ratio_matches:
         # queryIdx 指向原图关键点，trainIdx 指向变换后图像里的候选对应点。
