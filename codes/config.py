@@ -132,7 +132,7 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
 
     o2_block = raw_config.get("o2", {}) if isinstance(raw_config.get("o2"), dict) else {}
     max_features = int(o2_block.get("max_features", 800))
-    contrast_threshold = float(o2_block.get("contrast_threshold", 0.04))
+    contrast_threshold = float(o2_block.get("contrast_threshold", 0.09))  # 比 OpenCV 默认的 0.04 更严格一些，能剔除更多不稳定的弱特征点，提升匹配质量和最终的视差结果。课件上是0.09/3=0.03
     ratio_test = float(o2_block.get("ratio_test", 0.8))
     max_draw_matches = int(o2_block.get("max_draw_matches", 80))
 

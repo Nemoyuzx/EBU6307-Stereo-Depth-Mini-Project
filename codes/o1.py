@@ -119,7 +119,7 @@ def write_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) 
     for row in existing_rows:
         scene_name = row["scene"]
         replacement = rows_by_scene.pop(scene_name, None)
-        merged_rows.append(replacement if replacement is not None else row)
+        merged_rows.append(replacement if replacement is not None else dict(row))
 
     merged_rows.extend(rows_by_scene.values())
 
@@ -262,6 +262,7 @@ def run(config: O1Config, max_scenes: int | None, dry_run: bool, scene_name: str
         left = load_rgb(scene_dir / "im0.png")
         synthetic = synthesize_shift(left, config.shift_pixels)
         disparity = synthesize_disparity(left.shape[0], left.shape[1], config.shift_pixels)
+        ssim_score = compute_ssim(left, synthetic)
         scene_output_dir = config.synthetic_dir / scene_dir.name
         scene_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -271,8 +272,11 @@ def run(config: O1Config, max_scenes: int | None, dry_run: bool, scene_name: str
 
         calib_copied = copy_if_exists(scene_dir / "calib.txt", scene_output_dir / "calib.txt")
         write_scene_metadata(scene_output_dir, scene_dir.name, config.shift_pixels, calib_copied)
-        metric_rows.append({"scene": scene_dir.name, "shift_pixels": config.shift_pixels, "ssim": f"{compute_ssim(left, synthetic):.6f}"})
-        print(f"Wrote synthetic scene: {scene_output_dir} (calib.txt copied: {'yes' if calib_copied else 'no'})")
+        metric_rows.append({"scene": scene_dir.name, "shift_pixels": config.shift_pixels, "ssim": f"{ssim_score:.6f}"})
+        print(
+            f"Wrote synthetic scene: {scene_output_dir} "
+            f"(calib.txt copied: {'yes' if calib_copied else 'no'}, SSIM: {ssim_score:.6f})"
+        )
 
     write_metrics(config.metrics_file, metric_rows)
     print(f"Wrote SSIM summary: {config.metrics_file}")

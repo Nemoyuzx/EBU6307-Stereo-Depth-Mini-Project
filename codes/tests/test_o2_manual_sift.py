@@ -46,6 +46,45 @@ def _shift_image(image: np.ndarray, shift_y: int, shift_x: int) -> np.ndarray:
 
 
 class ManualSiftDetectorTests(unittest.TestCase):
+    def test_assign_orientations_discards_weak_gradient_votes(self) -> None:
+        detector = create_sift_detector(max_features=64, contrast_threshold=0.04)
+
+        magnitude = np.zeros((25, 25), dtype=np.float32)
+        orientation = np.zeros((25, 25), dtype=np.float32)
+        magnitude[12, 12] = 1.0
+        orientation[12, 12] = 0.0
+
+        weak_points = [
+            (8, 8), (8, 10), (8, 14),
+            (10, 8), (10, 14),
+            (14, 8), (14, 10), (14, 14),
+        ]
+        for yy, xx in weak_points:
+            magnitude[yy, xx] = 0.09
+            orientation[yy, xx] = 90.0
+
+        peak_angles = detector._assign_orientations(magnitude, orientation, x=12.0, y=12.0, sigma=1.6)
+
+        self.assertEqual(len(peak_angles), 1)
+        self.assertTrue(abs(peak_angles[0]) < 5.0 or abs(peak_angles[0] - 360.0) < 5.0)
+
+    def test_assign_orientations_uses_only_16x16_window_blocks(self) -> None:
+        detector = create_sift_detector(max_features=64, contrast_threshold=0.04)
+
+        magnitude = np.zeros((40, 40), dtype=np.float32)
+        orientation = np.zeros((40, 40), dtype=np.float32)
+
+        magnitude[12:14, 12:14] = 1.0
+        orientation[12:14, 12:14] = 45.0
+
+        magnitude[2:4, 2:4] = 10.0
+        orientation[2:4, 2:4] = 135.0
+
+        peak_angles = detector._assign_orientations(magnitude, orientation, x=20.0, y=20.0, sigma=1.6)
+
+        self.assertEqual(len(peak_angles), 1)
+        self.assertTrue(abs(peak_angles[0] - 45.0) < 10.0)
+
     def test_refine_candidate_location_returns_subpixel_coordinates(self) -> None:
         detector = create_sift_detector(max_features=64, contrast_threshold=0.04)
 
@@ -107,6 +146,20 @@ class ManualSiftDetectorTests(unittest.TestCase):
         self.assertEqual(descriptors.shape[0], len(keypoints))
         self.assertEqual(descriptors.shape[1], 128)
         self.assertLessEqual(len(keypoints), 64)
+
+    def test_descriptor_trilinear_interpolation_spreads_vote_across_neighbors(self) -> None:
+        detector = create_sift_detector(max_features=64, contrast_threshold=0.04)
+
+        magnitude = np.zeros((40, 40), dtype=np.float32)
+        orientation = np.zeros((40, 40), dtype=np.float32)
+        magnitude[17, 19] = 1.0
+        orientation[17, 19] = 22.5
+
+        descriptor = detector._build_descriptor(magnitude, orientation, x=16.0, y=16.0, sigma=1.6, angle=0.0)
+
+        self.assertIsNotNone(descriptor)
+        assert descriptor is not None
+        self.assertEqual(int(np.count_nonzero(descriptor > 1e-6)), 8)
 
     def test_shifted_view_produces_mutual_ratio_matches(self) -> None:
         detector = create_sift_detector(max_features=96, contrast_threshold=0.04)
