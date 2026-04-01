@@ -8,49 +8,137 @@ from typing import Any
 
 import numpy as np
 from PIL import Image
+from scipy import interpolate, ndimage
 from scipy.ndimage import gaussian_filter
 
 from common import discover_scenes, ensure_parent, filter_scene_dirs, load_rgb
 from config import O1Config
-from pfm import write_pfm
+from pfm import read_pfm, write_pfm
 
 
-def synthesize_shift(image: Any, shift_pixels: int) -> Any:
-    """把左图沿水平方向平移，合成一个最简右图，用于 O1 的工程化验证。"""
+def scale_reference_disparity(reference_disparity: Any, shift_pixels: int) -> np.ndarray:
+    """把参考视差稳健缩放到目标合成位移范围，同时保留相对深度层次。"""
 
-    shifted = np.zeros_like(image)
-    # 0 位移时直接复制，避免后面切片分支引入额外复杂度。
-    if shift_pixels == 0:
-        shifted[:] = image
-        return shifted
+    disparity = np.asarray(reference_disparity, dtype=np.float32)
+    if disparity.ndim == 3:
+        disparity = disparity[..., 0]
+    if disparity.ndim != 2:
+        raise ValueError(f"Expected a single-channel disparity map, got shape {disparity.shape}.")
 
-    width = image.shape[1]
-    # 位移绝对值超过图像宽度时，整张合成右图都会落到视野之外。
-    if abs(shift_pixels) >= width:
-        return shifted
+    target_shift = abs(int(shift_pixels))
+    if target_shift == 0:
+        return np.zeros_like(disparity, dtype=np.float32)
 
-    # 约定正位移表示右图内容相对左图向左平移；新暴露出来的区域直接补 0。
-    if shift_pixels > 0:
-        shifted[:, : width - shift_pixels, :] = image[:, shift_pixels:, :]
-    else:
-        shifted[:, -shift_pixels:, :] = image[:, : width + shift_pixels, :]
-    return shifted
+    disparity = np.where(np.isfinite(disparity), disparity, 0.0)
+    disparity = np.maximum(disparity, 0.0)
+    valid = disparity > 0.0
+    if not np.any(valid):
+        return np.zeros_like(disparity, dtype=np.float32)
+
+    low = float(np.percentile(disparity[valid], 5.0))
+    high = float(np.percentile(disparity[valid], 95.0))
+    if high <= low + 1e-6:
+        high = float(np.max(disparity[valid]))
+    if high <= 1e-6:
+        return np.zeros_like(disparity, dtype=np.float32)
+
+    scaled = np.zeros_like(disparity, dtype=np.float32)
+    scaled[valid] = np.clip((disparity[valid] - low) / max(high - low, 1e-6), 0.0, 1.0) * float(target_shift)
+    scaled = gaussian_filter(scaled, sigma=0.6)
+    scaled = np.where(valid, scaled, 0.0)
+    return np.clip(scaled, 0.0, float(target_shift)).astype(np.float32)
 
 
-def synthesize_disparity(height: int, width: int, shift_pixels: int) -> Any:
-    """根据固定平移量构造理想视差图，作为 O1 输出的基准真值。"""
+def _project_left_to_synthetic_view(image: Any, disparity: Any, shift_pixels: int) -> tuple[np.ndarray, np.ndarray]:
+    """按缩放后的视差把左图前向投影到合成视角，并返回空洞掩码。"""
 
-    disparity = np.zeros((height, width), dtype=np.float32)
-    # 没有有效重叠区域时，视差图保持全 0。
-    if shift_pixels == 0 or abs(shift_pixels) >= width:
-        return disparity
+    rgb = np.asarray(image, dtype=np.uint8)
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
+        raise ValueError(f"Expected an RGB image with shape HxWx3, got {rgb.shape}.")
 
-    # 仍然有对应关系的区域写入常数视差，形成这个 baseline 的“理想答案”。
-    if shift_pixels > 0:
-        disparity[:, shift_pixels:] = float(shift_pixels)
-    else:
-        disparity[:, : width + shift_pixels] = float(-shift_pixels)
-    return disparity
+    disparity_map = np.asarray(disparity, dtype=np.float32)
+    if disparity_map.shape != rgb.shape[:2]:
+        raise ValueError(f"Disparity shape {disparity_map.shape} does not match image shape {rgb.shape[:2]}.")
+
+    disparity_map = np.where(np.isfinite(disparity_map), disparity_map, 0.0)
+    disparity_map = np.maximum(disparity_map, 0.0)
+
+    height, width = disparity_map.shape
+    direction = 1 if shift_pixels >= 0 else -1
+    y_coords, x_coords = np.indices((height, width))
+    target_x = np.clip(np.rint(x_coords - direction * disparity_map).astype(np.int32), 0, width - 1)
+
+    # 远处先投影、近处后覆盖，更接近真实遮挡关系。
+    order = np.argsort(disparity_map.reshape(-1), kind="stable")
+    projected = np.zeros_like(rgb)
+    occupied = np.zeros((height, width), dtype=bool)
+    projected[y_coords.reshape(-1)[order], target_x.reshape(-1)[order]] = rgb.reshape(-1, 3)[order]
+    occupied[y_coords.reshape(-1)[order], target_x.reshape(-1)[order]] = True
+    return projected, ~occupied
+
+
+def _fill_projection_holes(projected: np.ndarray, missing_mask: np.ndarray) -> np.ndarray:
+    """修补重投影留下的空洞。"""
+
+    if not np.any(missing_mask):
+        return projected
+
+    filled = projected.astype(np.float32)
+    valid = (~missing_mask).astype(np.float32)
+    # 用 4 邻域做迭代扩散，让已有像素逐步向空洞内部传播，避免依赖 OpenCV inpaint。
+    kernel = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 1.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+    for _ in range(16):
+        if bool(np.all(valid > 0.5)):
+            break
+        neighbour_count = ndimage.convolve(valid, kernel, mode="nearest")
+        update_mask = (valid < 0.5) & (neighbour_count > 0.0)
+        if not np.any(update_mask):
+            break
+        for channel_index in range(filled.shape[2]):
+            neighbour_sum = ndimage.convolve(filled[..., channel_index] * valid, kernel, mode="nearest")
+            averaged = neighbour_sum / np.maximum(neighbour_count, 1.0)
+            filled[..., channel_index] = np.where(update_mask, averaged, filled[..., channel_index])
+        valid = np.where(update_mask, 1.0, valid)
+
+    # 若仍有孤立空洞，再对剩余空洞做基于周围有效像素的线性插值。
+    unresolved = valid < 0.5
+    if np.any(unresolved):
+        sample_mask = ~unresolved
+        sample_y, sample_x = np.nonzero(sample_mask)
+        query_y, query_x = np.nonzero(unresolved)
+
+        if sample_y.size > 0:
+            sample_points = np.column_stack((sample_y, sample_x))
+            query_points = np.column_stack((query_y, query_x))
+            for channel_index in range(filled.shape[2]):
+                sample_values = filled[..., channel_index][sample_mask]
+                interpolated = interpolate.griddata(
+                    sample_points,
+                    sample_values,
+                    query_points,
+                    method="linear",
+                    fill_value=np.nan,
+                )
+                if np.isnan(interpolated).any():
+                    nearest = interpolate.griddata(
+                        sample_points,
+                        sample_values,
+                        query_points[np.isnan(interpolated)],
+                        method="nearest",
+                    )
+                    interpolated[np.isnan(interpolated)] = nearest
+                filled[..., channel_index][unresolved] = interpolated
+
+    return np.clip(filled, 0.0, 255.0).round().astype(np.uint8)
+
+
+def synthesize_depth_aware_stereo(image: Any, reference_disparity: Any, shift_pixels: int) -> tuple[np.ndarray, np.ndarray]:
+    """用参考视差驱动重投影，生成更接近真实双目的合成视图。"""
+
+    scaled_disparity = scale_reference_disparity(reference_disparity, shift_pixels)
+    projected, missing_mask = _project_left_to_synthetic_view(image, scaled_disparity, shift_pixels)
+    synthetic = _fill_projection_holes(projected, missing_mask)
+    return synthetic, scaled_disparity
 
 
 def compute_ssim(left_image: Any, synthetic_image: Any) -> float:
@@ -149,10 +237,11 @@ def write_scene_metadata(scene_output_dir: Path, scene_name: str, shift_pixels: 
         "\n".join(
             [
                 f"scene: {scene_name}",
-                "generator: minimal O1 baseline",
+                "generator: depth-aware O1 synthesis",
                 "im0.png: original left image copied from the source scene",
-                "im1.png: synthetic right image created by horizontal shift",
-                f"shift_pixels: {shift_pixels}",
+                "im1.png: synthetic right image created by disparity-guided reprojection of im0.png",
+                f"target_max_shift_pixels: {abs(shift_pixels)}",
+                "disp0.pfm: rescaled left-view disparity derived from the source disp0.pfm",
                 f"calib.txt: {'copied' if calib_copied else 'missing in source scene'}",
             ]
         )
@@ -221,7 +310,7 @@ def validate_results(synthetic_dir: Path, scene_name: str | None = None) -> int:
 
 
 def run(config: O1Config, max_scenes: int | None, dry_run: bool, scene_name: str | None) -> int:
-    """执行 O1：发现场景、生成合成右图与视差图、写出指标。"""
+    """执行 O1：用参考视差重投影生成合成右图与对应视差图、并写出指标。"""
     discovered_scenes = discover_scenes(config.middlebury_root)
     discovered_count = len(discovered_scenes)
     scenes = filter_scene_dirs(discovered_scenes, scene_name)
@@ -271,11 +360,21 @@ def run(config: O1Config, max_scenes: int | None, dry_run: bool, scene_name: str
 
     config.synthetic_dir.mkdir(parents=True, exist_ok=True)
     metric_rows: list[dict[str, str | float | int]] = []
+    failed_scenes: list[str] = []
     for scene_dir in scenes:
-        # O1 不做真实匹配，只是把左图改造成一个可控的伪双目样本。
+        # O1 直接复用场景自带的参考视差，把左图重投影成新的合成右图。
         left = load_rgb(scene_dir / "im0.png")
-        synthetic = synthesize_shift(left, config.shift_pixels)
-        disparity = synthesize_disparity(left.shape[0], left.shape[1], config.shift_pixels)
+        disparity_path = scene_dir / "disp0.pfm"
+        if not disparity_path.exists():
+            failed_scenes.append(scene_dir.name)
+            print(
+                f"Scene {scene_dir.name} is missing disp0.pfm, which is required for depth-aware O1 synthesis.",
+                file=sys.stderr,
+            )
+            continue
+
+        source_disparity = read_pfm(disparity_path)
+        synthetic, disparity = synthesize_depth_aware_stereo(left, source_disparity, config.shift_pixels)
         ssim_score = compute_ssim(left, synthetic)
         scene_output_dir = config.synthetic_dir / scene_dir.name
         scene_output_dir.mkdir(parents=True, exist_ok=True)
@@ -293,9 +392,15 @@ def run(config: O1Config, max_scenes: int | None, dry_run: bool, scene_name: str
             f"(calib.txt copied: {'yes' if calib_copied else 'no'}, SSIM: {ssim_score:.6f})"
         )
 
+    if failed_scenes:
+        print("Skipped scenes without disp0.pfm: " + ", ".join(failed_scenes), file=sys.stderr)
+
+    if not metric_rows:
+        return 1 if failed_scenes else 0
+
     write_metrics(config.metrics_file, metric_rows)
     print(f"Wrote SSIM summary: {config.metrics_file}")
-    return 0
+    return 1 if failed_scenes else 0
 
 
 if __name__ == '__main__':
