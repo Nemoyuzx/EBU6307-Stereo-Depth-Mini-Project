@@ -41,6 +41,8 @@ DISTINCT_TRANSFORM_FAMILIES = (
     "intensity",
 )
 
+MAX_VISUALIZED_SIFT_ITEMS = 20
+
 MetricValue = str | float | int
 MetricRow = dict[str, MetricValue]
 TransformParams = dict[str, MetricValue]
@@ -71,8 +73,8 @@ class ManualMatch:
 
 @dataclass(frozen=True)
 class _ScaleSpaceCandidate:
-    x: int
-    y: int
+    x: float
+    y: float
     octave: int
     layer: int
     sigma: float
@@ -89,6 +91,11 @@ class ManualSiftDetector:
         self.edge_threshold = 10.0  # 边缘响应剔除阈值，用 Hessian 主曲率比过滤细长边缘点。
 
     def detectAndCompute(self, image: Any, mask: Any) -> tuple[list[ManualKeypoint], np.ndarray | None]:
+        # 手写版 SIFT 主流程对应四个阶段：
+        # 1. 建立高斯尺度空间 L(x,y,sigma)=G(x,y,sigma)*I(x,y)，并用 DoG 找跨尺度极值。
+        # 2. 过滤低对比度点和边缘响应点，保留定位更稳定的候选关键点。
+        # 3. 在关键点所在尺度计算梯度方向直方图，给关键点分配主方向。
+        # 4. 在主方向坐标系中构造 4x4x8=128 维描述子，并做归一化增强鲁棒性。
         if mask is not None:
             raise NotImplementedError("ManualSiftDetector does not support masks.")
 
@@ -112,27 +119,30 @@ class ManualSiftDetector:
 
         for candidate in selected_candidates:
             magnitude, orientation = gradient_pyramid[candidate.octave][candidate.layer]
-            angle = self._assign_orientation(magnitude, orientation, candidate.x, candidate.y, candidate.sigma)
-            if angle is None:
+            angles = self._assign_orientations(magnitude, orientation, candidate.x, candidate.y, candidate.sigma)
+            if not angles:
                 continue
-            descriptor = self._build_descriptor(magnitude, orientation, candidate.x, candidate.y, candidate.sigma, angle)
-            if descriptor is None:
-                continue
+            for angle in angles:
+                descriptor = self._build_descriptor(magnitude, orientation, candidate.x, candidate.y, candidate.sigma, angle)
+                if descriptor is None:
+                    continue
 
-            scale_factor = float(2 ** candidate.octave)
-            keypoints.append(
-                ManualKeypoint(
-                    x=float(candidate.x * scale_factor),
-                    y=float(candidate.y * scale_factor),
-                    size=float(candidate.sigma * scale_factor * 2.0),
-                    angle=float(angle),
-                    response=float(candidate.response),
-                    octave=candidate.octave,
-                    layer=candidate.layer,
-                    sigma=float(candidate.sigma * scale_factor),
+                scale_factor = float(2 ** candidate.octave)
+                keypoints.append(
+                    ManualKeypoint(
+                        x=float(candidate.x * scale_factor),
+                        y=float(candidate.y * scale_factor),
+                        size=float(candidate.sigma * scale_factor * 2.0),
+                        angle=float(angle),
+                        response=float(candidate.response),
+                        octave=candidate.octave,
+                        layer=candidate.layer,
+                        sigma=float(candidate.sigma * scale_factor),
+                    )
                 )
-            )
-            descriptors.append(descriptor)
+                descriptors.append(descriptor)
+                if len(keypoints) >= self.max_features:
+                    break
             if len(keypoints) >= self.max_features:
                 break
 
@@ -141,6 +151,10 @@ class ManualSiftDetector:
         return keypoints, np.asarray(descriptors, dtype=np.float32)
 
     def _build_scale_space(self, image: np.ndarray) -> tuple[list[list[np.ndarray]], list[list[np.ndarray]], list[list[float]]]:
+        # 第一步：尺度空间极值检测。
+        # 标准 SIFT 先构造高斯尺度空间 L(x,y,sigma)=G(x,y,sigma)*I(x,y)，其中
+        # G(x,y,sigma)=1/(2*pi*sigma^2) * exp(-(x^2+y^2)/(2*sigma^2))。
+        # sigma 越大，图像越模糊，也就代表越粗的观察尺度。
         gaussian_pyramid: list[list[np.ndarray]] = []
         dog_pyramid: list[list[np.ndarray]] = []
         sigma_pyramid: list[list[float]] = []
@@ -156,6 +170,7 @@ class ManualSiftDetector:
             octave_gaussians = [current]
             octave_sigmas = [self.base_sigma]
             for layer in range(1, levels_per_octave):
+                # 每个 octave 内按 k=2^(1/s) 递增 sigma，得到同一组里不同模糊强度的图像。
                 prev_sigma = self.base_sigma * (k ** (layer - 1))
                 total_sigma = self.base_sigma * (k ** layer)
                 incremental_sigma = math.sqrt(max(total_sigma * total_sigma - prev_sigma * prev_sigma, 1e-6))
@@ -167,9 +182,12 @@ class ManualSiftDetector:
             gaussian_pyramid.append(octave_gaussians)
             sigma_pyramid.append(octave_sigmas)
             dog_pyramid.append(
+                # 高斯差分 DoG: D(x,y,sigma)=L(x,y,k*sigma)-L(x,y,sigma)，它是 LoG 的高效近似。
                 [octave_gaussians[layer + 1] - octave_gaussians[layer] for layer in range(len(octave_gaussians) - 1)]
             )
 
+            # 一个 octave 结束后，把中间层降采样为下一组的 base image，形成金字塔结构。
+            # 这对应标准 SIFT 中“第一组看原始分辨率，下一组看尺寸减半图像”的做法。
             next_base = octave_gaussians[self.scales_per_octave][::2, ::2]
             if min(next_base.shape[:2]) < 24:
                 break
@@ -178,6 +196,9 @@ class ManualSiftDetector:
         return gaussian_pyramid, dog_pyramid, sigma_pyramid
 
     def _build_gradient_pyramid(self, gaussian_pyramid: list[list[np.ndarray]]) -> list[list[tuple[np.ndarray, np.ndarray]]]:
+        # 第三步和第四步都会复用梯度信息，所以先在每个尺度图像上预计算：
+        # m(x,y)=sqrt((L(x+1,y)-L(x-1,y))^2 + (L(x,y+1)-L(x,y-1))^2)
+        # theta(x,y)=atan2(L(x,y+1)-L(x,y-1), L(x+1,y)-L(x-1,y))。
         gradient_pyramid: list[list[tuple[np.ndarray, np.ndarray]]] = []
         for octave_images in gaussian_pyramid:
             octave_gradients: list[tuple[np.ndarray, np.ndarray]] = []
@@ -195,6 +216,13 @@ class ManualSiftDetector:
         dog_pyramid: list[list[np.ndarray]],
         sigma_pyramid: list[list[float]],
     ) -> list[_ScaleSpaceCandidate]:
+        # 第一步的 DoG 极值搜索：每个点都要和 26 个邻域点比较，分别是
+        # 同尺度 8 个邻点、上一尺度 9 个邻点、下一尺度 9 个邻点。
+        # 只有当它是这 26 个点里的最大值或最小值时，才会成为初始候选关键点。
+        #
+        # 第二步：对初始极值做 3D 泰勒展开近似，求连续空间中的
+        # X_hat=(delta_x, delta_y, delta_sigma)，把像素级候选点细化到子像素/子尺度位置。
+        # 当某个维度上的偏移超过 0.5 时，说明更接近相邻采样点，需要迭代更新中心再重算。
         candidates: list[_ScaleSpaceCandidate] = []
         contrast_floor = max(0.001, self.contrast_threshold / float(self.scales_per_octave))
 
@@ -211,6 +239,7 @@ class ManualSiftDetector:
                     & (np.abs(current) >= contrast_floor)
                 )
 
+                # 边界点没有完整的 3x3x3 邻域，既不利于极值比较，也不利于后续描述子提取。
                 border = 8
                 candidate_mask[:border, :] = False
                 candidate_mask[-border:, :] = False
@@ -219,23 +248,127 @@ class ManualSiftDetector:
 
                 ys, xs = np.nonzero(candidate_mask)
                 for y, x in zip(ys.tolist(), xs.tolist()):
-                    if not self._passes_edge_response(current, y, x):
-                        continue
-                    candidates.append(
-                        _ScaleSpaceCandidate(
-                            x=int(x),
-                            y=int(y),
-                            octave=octave,
-                            layer=layer,
-                            sigma=float(sigma_pyramid[octave][layer]),
-                            response=float(abs(current[y, x])),
-                        )
+                    candidate = self._refine_candidate_location(
+                        octave=octave,
+                        octave_dogs=octave_dogs,
+                        octave_sigmas=sigma_pyramid[octave],
+                        layer=layer,
+                        y=int(y),
+                        x=int(x),
+                        contrast_floor=contrast_floor,
                     )
+                    if candidate is None:
+                        continue
+                    edge_y = int(round(candidate.y))
+                    edge_x = int(round(candidate.x))
+                    if not self._passes_edge_response(octave_dogs[candidate.layer], edge_y, edge_x):
+                        continue
+                    candidates.append(candidate)
 
         candidates.sort(key=lambda candidate: candidate.response, reverse=True)
         return candidates
 
+    def _refine_candidate_location(
+        self,
+        octave: int,
+        octave_dogs: list[np.ndarray],
+        octave_sigmas: list[float],
+        layer: int,
+        y: int,
+        x: int,
+        contrast_floor: float,
+    ) -> _ScaleSpaceCandidate | None:
+        # 第二步：关键点精确定位。
+        # 对 D(x,y,sigma) 在当前采样点附近做二阶泰勒展开：
+        # D(X)=D + dD/dX^T X + 1/2 * X^T * d2D/dX2 * X。
+        # 令导数为 0 后可得到偏移 X_hat=-H^-1 g，其中 g 是一阶导，H 是 3D Hessian。
+        # 这样可以把离散极值细化到连续位置，并顺带更准确地评估对比度。
+        max_iterations = 5
+        offset = np.zeros(3, dtype=np.float32)
+
+        for _ in range(max_iterations):
+            if layer <= 0 or layer >= len(octave_dogs) - 1:
+                return None
+            current = octave_dogs[layer]
+            height, width = current.shape
+            if x <= 0 or x >= width - 1 or y <= 0 or y >= height - 1:
+                return None
+
+            gradient = self._dog_gradient(octave_dogs, layer, y, x)
+            hessian = self._dog_hessian(octave_dogs, layer, y, x)
+            try:
+                offset = -np.linalg.solve(hessian, gradient)
+            except np.linalg.LinAlgError:
+                return None
+
+            if np.all(np.abs(offset) < 0.5):
+                break
+
+            x += int(math.copysign(1.0, float(offset[0]))) if abs(float(offset[0])) >= 0.5 else 0
+            y += int(math.copysign(1.0, float(offset[1]))) if abs(float(offset[1])) >= 0.5 else 0
+            layer += int(math.copysign(1.0, float(offset[2]))) if abs(float(offset[2])) >= 0.5 else 0
+        else:
+            return None
+
+        current = octave_dogs[layer]
+        interpolated_response = float(current[y, x] + 0.5 * gradient.dot(offset))
+        if abs(interpolated_response) < contrast_floor:
+            return None
+
+        refined_x = float(x + offset[0])
+        refined_y = float(y + offset[1])
+        if refined_x < 8.0 or refined_x >= current.shape[1] - 8.0:
+            return None
+        if refined_y < 8.0 or refined_y >= current.shape[0] - 8.0:
+            return None
+
+        refined_sigma = float(octave_sigmas[layer] * (2.0 ** (float(offset[2]) / self.scales_per_octave)))
+        return _ScaleSpaceCandidate(
+            x=refined_x,
+            y=refined_y,
+            octave=octave,
+            layer=layer,
+            sigma=refined_sigma,
+            response=abs(interpolated_response),
+        )
+
+    def _dog_gradient(self, octave_dogs: list[np.ndarray], layer: int, y: int, x: int) -> np.ndarray:
+        previous = octave_dogs[layer - 1]
+        current = octave_dogs[layer]
+        following = octave_dogs[layer + 1]
+        return np.asarray(
+            [
+                (current[y, x + 1] - current[y, x - 1]) * 0.5,
+                (current[y + 1, x] - current[y - 1, x]) * 0.5,
+                (following[y, x] - previous[y, x]) * 0.5,
+            ],
+            dtype=np.float32,
+        )
+
+    def _dog_hessian(self, octave_dogs: list[np.ndarray], layer: int, y: int, x: int) -> np.ndarray:
+        previous = octave_dogs[layer - 1]
+        current = octave_dogs[layer]
+        following = octave_dogs[layer + 1]
+        dxx = current[y, x + 1] + current[y, x - 1] - 2.0 * current[y, x]
+        dyy = current[y + 1, x] + current[y - 1, x] - 2.0 * current[y, x]
+        dss = following[y, x] + previous[y, x] - 2.0 * current[y, x]
+        dxy = (current[y + 1, x + 1] - current[y + 1, x - 1] - current[y - 1, x + 1] + current[y - 1, x - 1]) * 0.25
+        dxs = (following[y, x + 1] - following[y, x - 1] - previous[y, x + 1] + previous[y, x - 1]) * 0.25
+        dys = (following[y + 1, x] - following[y - 1, x] - previous[y + 1, x] + previous[y - 1, x]) * 0.25
+        return np.asarray(
+            [
+                [dxx, dxy, dxs],
+                [dxy, dyy, dys],
+                [dxs, dys, dss],
+            ],
+            dtype=np.float32,
+        )
+
     def _passes_edge_response(self, dog_image: np.ndarray, y: int, x: int) -> bool:
+        # 第二步：关键点精确定位里的边缘响应剔除。
+        # 标准 SIFT 使用 Hessian 矩阵 H=[[Dxx,Dxy],[Dxy,Dyy]] 估计主曲率。
+        # 若 Tr(H)^2 / Det(H) >= ((r+1)^2) / r，则说明一个方向曲率远大于另一个方向，
+        # 该点更像边缘上的响应而不是稳定角点，需要剔除。这里的 r 就是 edge_threshold。
         dxx = float(dog_image[y, x + 1] + dog_image[y, x - 1] - 2.0 * dog_image[y, x])
         dyy = float(dog_image[y + 1, x] + dog_image[y - 1, x] - 2.0 * dog_image[y, x])
         dxy = float(
@@ -253,6 +386,8 @@ class ManualSiftDetector:
         return curvature_ratio < threshold
 
     def _suppress_candidates(self, candidates: list[_ScaleSpaceCandidate]) -> list[_ScaleSpaceCandidate]:
+        # 这一步属于当前实现的工程性补充，不是原始 Lowe 论文里的核心公式：
+        # 为了避免大量响应几乎重合的点占满 max_features，这里做一个简单的空间抑制。
         selected: list[_ScaleSpaceCandidate] = []
         occupancy: dict[tuple[int, int], list[tuple[float, float]]] = {}
         for candidate in candidates:
@@ -283,53 +418,101 @@ class ManualSiftDetector:
                 break
         return selected
 
-    def _assign_orientation(
+    def _assign_orientations(
         self,
         magnitude: np.ndarray,
         orientation: np.ndarray,
-        x: int,
-        y: int,
+        x: float,
+        y: float,
         sigma: float,
-    ) -> float | None:
+    ) -> list[float]:
+        # 第三步：方向分配。
+        # 在关键点所在尺度下，统计其邻域内梯度方向直方图。标准 SIFT 使用 36 个 bin，
+        # 每个 bin 覆盖 10 度，并用高斯窗口对离中心更近的梯度赋予更大权重。
+        # 直方图的最高峰对应主方向，从而让后续描述子具备旋转不变性。
+        # 如果其他局部峰值达到主峰的 80% 以上，也会复制成辅方向关键点，
+        # 这样在角点纹理或双峰方向结构里，匹配稳定性会明显更高。
         window_sigma = max(1.0, 1.5 * sigma)
         radius = max(3, int(round(3.0 * window_sigma)))
+        min_y = int(math.floor(y - radius))
+        max_y = int(math.ceil(y + radius))
+        min_x = int(math.floor(x - radius))
+        max_x = int(math.ceil(x + radius))
         if (
-            y - radius < 0
-            or y + radius >= magnitude.shape[0]
-            or x - radius < 0
-            or x + radius >= magnitude.shape[1]
+            min_y < 0
+            or max_y >= magnitude.shape[0]
+            or min_x < 0
+            or max_x >= magnitude.shape[1]
         ):
-            return None
+            return []
 
         histogram = np.zeros(36, dtype=np.float32)
-        for yy in range(y - radius, y + radius + 1):
-            for xx in range(x - radius, x + radius + 1):
+        for yy in range(min_y, max_y + 1):
+            for xx in range(min_x, max_x + 1):
                 dx = float(xx - x)
                 dy = float(yy - y)
+                # 用高斯窗口强调靠近关键点中心的梯度，减弱远处噪声的干扰。
                 weight = math.exp(-(dx * dx + dy * dy) / (2.0 * window_sigma * window_sigma))
                 bin_index = int(orientation[yy, xx] // 10.0) % 36
                 histogram[bin_index] += weight * float(magnitude[yy, xx])
 
+        # 对环形直方图做平滑，降低量化噪声对主方向选择的影响。
         histogram = self._smooth_circular_histogram(histogram, passes=4)
-        dominant_bin = int(np.argmax(histogram))
-        return float(dominant_bin * 10.0)
+        return self._extract_orientation_peaks(histogram, peak_ratio=0.8)
+
+    def _extract_orientation_peaks(self, histogram: np.ndarray, peak_ratio: float) -> list[float]:
+        max_value = float(np.max(histogram, initial=0.0))
+        if max_value <= 1e-8:
+            return []
+
+        threshold = max_value * peak_ratio
+        peak_angles: list[float] = []
+        bin_count = histogram.shape[0]
+        for bin_index in range(bin_count):
+            left = float(histogram[(bin_index - 1) % bin_count])
+            center = float(histogram[bin_index])
+            right = float(histogram[(bin_index + 1) % bin_count])
+            if center < threshold:
+                continue
+            if center < left or center < right:
+                continue
+
+            denominator = left - 2.0 * center + right
+            peak_offset = 0.0 if abs(denominator) < 1e-8 else 0.5 * (left - right) / denominator
+            peak_offset = float(np.clip(peak_offset, -0.5, 0.5))
+            angle = ((bin_index + peak_offset) * 360.0 / bin_count) % 360.0
+            peak_angles.append(float(angle))
+
+        peak_angles.sort()
+        return peak_angles
 
     def _build_descriptor(
         self,
         magnitude: np.ndarray,
         orientation: np.ndarray,
-        x: int,
-        y: int,
+        x: float,
+        y: float,
         sigma: float,
         angle: float,
     ) -> np.ndarray | None:
+        # 第四步：关键点描述子生成。
+        # 先把邻域坐标系旋转到关键点主方向上，这是旋转不变性的核心。
+        # 然后取近似 16x16 的窗口，划成 4x4 个子区域；每个子区域统计 8 个方向 bin，
+        # 最终得到 4*4*8=128 维描述子。
+        #
+        # 标准 SIFT 会在子区域和方向 bin 上做三线性插值；当前实现采用较直接的硬分桶版本，
+        # 但保留了高斯加权、L2 归一化、0.2 截断、再次归一化这几项关键鲁棒性步骤。
         sigma_safe = max(1.0, sigma)
         radius = max(8, int(round(8.0 * sigma_safe)))
+        min_y = int(math.floor(y - radius))
+        max_y = int(math.ceil(y + radius))
+        min_x = int(math.floor(x - radius))
+        max_x = int(math.ceil(x + radius))
         if (
-            y - radius < 1
-            or y + radius >= magnitude.shape[0] - 1
-            or x - radius < 1
-            or x + radius >= magnitude.shape[1] - 1
+            min_y < 1
+            or max_y >= magnitude.shape[0] - 1
+            or min_x < 1
+            or max_x >= magnitude.shape[1] - 1
         ):
             return None
 
@@ -338,10 +521,11 @@ class ManualSiftDetector:
         cos_angle = math.cos(angle_rad)
         sin_angle = math.sin(angle_rad)
 
-        for yy in range(y - radius, y + radius + 1):
-            for xx in range(x - radius, x + radius + 1):
+        for yy in range(min_y, max_y + 1):
+            for xx in range(min_x, max_x + 1):
                 dx = float(xx - x)
                 dy = float(yy - y)
+                # 把局部坐标旋转到主方向参考系，这样同一结构旋转后仍会落到相近的描述子布局里。
                 rotated_x = (cos_angle * dx + sin_angle * dy) / sigma_safe
                 rotated_y = (-sin_angle * dx + cos_angle * dy) / sigma_safe
                 if abs(rotated_x) >= 8.0 or abs(rotated_y) >= 8.0:
@@ -353,6 +537,7 @@ class ManualSiftDetector:
 
                 relative_angle = (float(orientation[yy, xx]) - angle) % 360.0
                 orientation_bin = int(relative_angle // 45.0) % 8
+                # 描述子阶段也继续使用高斯权重，让靠近关键点中心的局部结构贡献更大。
                 weight = math.exp(-(rotated_x * rotated_x + rotated_y * rotated_y) / 64.0)
                 descriptor[cell_y, cell_x, orientation_bin] += weight * float(magnitude[yy, xx])
 
@@ -360,6 +545,7 @@ class ManualSiftDetector:
         norm = float(np.linalg.norm(vector))
         if norm < 1e-8:
             return None
+        # 第一次 L2 归一化抵消整体光照缩放；0.2 截断再归一化用于抑制局部过亮或饱和区域。
         vector = vector / norm
         vector = np.clip(vector, 0.0, 0.2)
         renorm = float(np.linalg.norm(vector))
@@ -429,7 +615,9 @@ def draw_keypoints(image_bgr: Any, keypoints: list[ManualKeypoint]) -> Any:
     """把关键点以可视化形式画到图像上，便于结果检查。"""
 
     canvas = np.asarray(image_bgr).copy()
-    for keypoint in keypoints:
+    # 只画响应最强的少量关键点，避免可视化结果被过密标记淹没。
+    visible_keypoints = sorted(keypoints, key=lambda keypoint: keypoint.response, reverse=True)[:MAX_VISUALIZED_SIFT_ITEMS]
+    for keypoint in visible_keypoints:
         center = (int(round(keypoint.x)), int(round(keypoint.y)))
         radius = max(2, int(round(keypoint.size / 2.0)))
         angle_rad = math.radians(keypoint.angle)
@@ -460,7 +648,9 @@ def draw_matches(
     canvas[: right.shape[0], left.shape[1] : left.shape[1] + right.shape[1]] = right
 
     x_offset = left.shape[1]
-    for index, match in enumerate(matches):
+    # 只展示距离最小的少量匹配，便于人工观察每条连线。
+    visible_matches = sorted(matches, key=lambda match: match.distance)[:MAX_VISUALIZED_SIFT_ITEMS]
+    for index, match in enumerate(visible_matches):
         left_point = left_keypoints[match.queryIdx]
         right_point = right_keypoints[match.trainIdx]
         color = (

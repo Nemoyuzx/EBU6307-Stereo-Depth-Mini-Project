@@ -46,6 +46,56 @@ def _shift_image(image: np.ndarray, shift_y: int, shift_x: int) -> np.ndarray:
 
 
 class ManualSiftDetectorTests(unittest.TestCase):
+    def test_refine_candidate_location_returns_subpixel_coordinates(self) -> None:
+        detector = create_sift_detector(max_features=64, contrast_threshold=0.04)
+
+        yy, xx = np.mgrid[0:21, 0:21].astype(np.float32)
+        center_x = 10.25
+        center_y = 9.75
+        center_scale = 0.2
+        octave_dogs = []
+        for scale_offset in (-1.0, 0.0, 1.0):
+            surface = 5.0 - 0.4 * (
+                (xx - center_x) ** 2
+                + (yy - center_y) ** 2
+                + (scale_offset - center_scale) ** 2
+            )
+            octave_dogs.append(surface.astype(np.float32))
+
+        candidate = detector._refine_candidate_location(
+            octave=0,
+            octave_dogs=octave_dogs,
+            octave_sigmas=[1.6, 2.0, 2.5],
+            layer=1,
+            y=10,
+            x=10,
+            contrast_floor=0.01,
+        )
+
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        self.assertNotEqual(candidate.x, round(candidate.x))
+        self.assertNotEqual(candidate.y, round(candidate.y))
+        self.assertAlmostEqual(candidate.x, center_x, places=2)
+        self.assertAlmostEqual(candidate.y, center_y, places=2)
+
+    def test_extract_orientation_peaks_keeps_secondary_peaks_above_80_percent(self) -> None:
+        detector = create_sift_detector(max_features=64, contrast_threshold=0.04)
+
+        histogram = np.zeros(36, dtype=np.float32)
+        histogram[0] = 10.0
+        histogram[4] = 8.4
+        histogram[35] = 2.0
+        histogram[1] = 1.8
+        histogram[3] = 1.6
+        histogram[5] = 1.4
+
+        peak_angles = detector._extract_orientation_peaks(histogram, peak_ratio=0.8)
+
+        self.assertEqual(len(peak_angles), 2)
+        self.assertTrue(any(abs(angle - 0.0) < 5.0 or abs(angle - 360.0) < 5.0 for angle in peak_angles))
+        self.assertTrue(any(abs(angle - 40.0) < 5.0 for angle in peak_angles))
+
     def test_detect_and_compute_returns_keypoints_and_128d_descriptors(self) -> None:
         detector = create_sift_detector(max_features=64, contrast_threshold=0.04)
 
