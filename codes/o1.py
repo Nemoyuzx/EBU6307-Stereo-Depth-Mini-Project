@@ -17,7 +17,7 @@ from pfm import read_pfm, write_pfm
 
 
 def scale_reference_disparity(reference_disparity: Any, shift_pixels: int) -> np.ndarray:
-    """把参考视差稳健缩放到目标合成位移范围，同时保留相对深度层次。"""
+    """清洗参考视差图，直接保留真实视差值用于重投影。"""
 
     disparity = np.asarray(reference_disparity, dtype=np.float32)
     if disparity.ndim == 3:
@@ -25,32 +25,20 @@ def scale_reference_disparity(reference_disparity: Any, shift_pixels: int) -> np
     if disparity.ndim != 2:
         raise ValueError(f"Expected a single-channel disparity map, got shape {disparity.shape}.")
 
-    target_shift = abs(int(shift_pixels))
-    if target_shift == 0:
+    if int(shift_pixels) == 0:
         return np.zeros_like(disparity, dtype=np.float32)
 
     disparity = np.where(np.isfinite(disparity), disparity, 0.0)
     disparity = np.maximum(disparity, 0.0)
+    # 只做轻微平滑，减少离散视差边界带来的抖动；不再压缩真实视差范围。
+    smoothed = gaussian_filter(disparity, sigma=0.4)
     valid = disparity > 0.0
-    if not np.any(valid):
-        return np.zeros_like(disparity, dtype=np.float32)
-
-    low = float(np.percentile(disparity[valid], 5.0))
-    high = float(np.percentile(disparity[valid], 95.0))
-    if high <= low + 1e-6:
-        high = float(np.max(disparity[valid]))
-    if high <= 1e-6:
-        return np.zeros_like(disparity, dtype=np.float32)
-
-    scaled = np.zeros_like(disparity, dtype=np.float32)
-    scaled[valid] = np.clip((disparity[valid] - low) / max(high - low, 1e-6), 0.0, 1.0) * float(target_shift)
-    scaled = gaussian_filter(scaled, sigma=0.6)
-    scaled = np.where(valid, scaled, 0.0)
-    return np.clip(scaled, 0.0, float(target_shift)).astype(np.float32)
+    smoothed = np.where(valid, smoothed, 0.0)
+    return smoothed.astype(np.float32)
 
 
 def _project_left_to_synthetic_view(image: Any, disparity: Any, shift_pixels: int) -> tuple[np.ndarray, np.ndarray]:
-    """按缩放后的视差把左图前向投影到合成视角，并返回空洞掩码。"""
+    """按真实参考视差把左图前向投影到合成视角，并返回空洞掩码。"""
 
     rgb = np.asarray(image, dtype=np.uint8)
     if rgb.ndim != 3 or rgb.shape[2] != 3:
@@ -85,22 +73,31 @@ def _fill_projection_holes(projected: np.ndarray, missing_mask: np.ndarray) -> n
 
     filled = projected.astype(np.float32)
     valid = (~missing_mask).astype(np.float32)
-    # 用 4 邻域做迭代扩散，让已有像素逐步向空洞内部传播，避免依赖 OpenCV inpaint。
     kernel = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 1.0], [0.0, 1.0, 0.0]], dtype=np.float32)
-    for _ in range(16):
-        if bool(np.all(valid > 0.5)):
-            break
-        neighbour_count = ndimage.convolve(valid, kernel, mode="nearest")
-        update_mask = (valid < 0.5) & (neighbour_count > 0.0)
-        if not np.any(update_mask):
-            break
-        for channel_index in range(filled.shape[2]):
-            neighbour_sum = ndimage.convolve(filled[..., channel_index] * valid, kernel, mode="nearest")
-            averaged = neighbour_sum / np.maximum(neighbour_count, 1.0)
-            filled[..., channel_index] = np.where(update_mask, averaged, filled[..., channel_index])
-        valid = np.where(update_mask, 1.0, valid)
 
-    # 若仍有孤立空洞，再对剩余空洞做基于周围有效像素的线性插值。
+    def _diffuse_once(current_filled: np.ndarray, current_valid: np.ndarray, passes: int) -> tuple[np.ndarray, np.ndarray]:
+        for _ in range(passes):
+            if bool(np.all(current_valid > 0.5)):
+                break
+            neighbour_count = ndimage.convolve(current_valid, kernel, mode="nearest")
+            update_mask = (current_valid < 0.5) & (neighbour_count > 0.0)
+            if not np.any(update_mask):
+                break
+            for channel_index in range(current_filled.shape[2]):
+                neighbour_sum = ndimage.convolve(
+                    current_filled[..., channel_index] * current_valid,
+                    kernel,
+                    mode="nearest",
+                )
+                averaged = neighbour_sum / np.maximum(neighbour_count, 1.0)
+                current_filled[..., channel_index] = np.where(update_mask, averaged, current_filled[..., channel_index])
+            current_valid = np.where(update_mask, 1.0, current_valid)
+        return current_filled, current_valid
+
+    # 第一阶段：先用少量 4 邻域扩散修掉细小裂缝和近邻空洞。
+    filled, valid = _diffuse_once(filled, valid, passes=8)
+
+    # 第二阶段：对剩余大块空洞做基于周围有效像素的线性插值。
     unresolved = valid < 0.5
     if np.any(unresolved):
         sample_mask = ~unresolved
@@ -128,6 +125,10 @@ def _fill_projection_holes(projected: np.ndarray, missing_mask: np.ndarray) -> n
                     )
                     interpolated[np.isnan(interpolated)] = nearest
                 filled[..., channel_index][unresolved] = interpolated
+            valid = np.where(unresolved, 1.0, valid)
+
+    # 第三阶段：再补一小轮扩散，把插值区域和原始投影边界接顺一点。
+    filled, valid = _diffuse_once(filled, valid, passes=3)
 
     return np.clip(filled, 0.0, 255.0).round().astype(np.uint8)
 
@@ -141,17 +142,17 @@ def synthesize_depth_aware_stereo(image: Any, reference_disparity: Any, shift_pi
     return synthetic, scaled_disparity
 
 
-def compute_ssim(left_image: Any, synthetic_image: Any) -> float:
-    """手工实现一个简化版多通道 SSIM，用于衡量原始左图和合成右图的结构相似性。"""
+def compute_ssim(reference_image: Any, synthetic_image: Any) -> float:
+    """手工实现一个简化版多通道 SSIM，用于衡量参考图像与合成图像的结构相似性。"""
 
-    left = np.asarray(left_image, dtype=np.float64)
-    right = np.asarray(synthetic_image, dtype=np.float64)
-    if left.shape != right.shape:
+    reference = np.asarray(reference_image, dtype=np.float64)
+    synthetic = np.asarray(synthetic_image, dtype=np.float64)
+    if reference.shape != synthetic.shape:
         raise ValueError("SSIM inputs must have the same shape.")
 
-    if left.ndim == 2:
-        left = left[..., None]
-        right = right[..., None]
+    if reference.ndim == 2:
+        reference = reference[..., None]
+        synthetic = synthetic[..., None]
 
     data_range = 255.0
     c1 = (0.01 * data_range) ** 2
@@ -159,9 +160,9 @@ def compute_ssim(left_image: Any, synthetic_image: Any) -> float:
     sigma = 1.5
 
     channel_scores: list[float] = []
-    for channel_index in range(left.shape[2]):
-        x = left[..., channel_index]
-        y = right[..., channel_index]
+    for channel_index in range(reference.shape[2]):
+        x = reference[..., channel_index]
+        y = synthetic[..., channel_index]
         # 先计算局部均值，再据此构造方差和协方差项。
         mu_x = gaussian_filter(x, sigma=sigma)
         mu_y = gaussian_filter(y, sigma=sigma)
@@ -191,7 +192,11 @@ def read_metrics(metrics_file: Path) -> list[dict[str, str]]:
     with metrics_file.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         return [
-            {"scene": row.get("scene", ""), "shift_pixels": row.get("shift_pixels", ""), "ssim": row.get("ssim", "")}
+            {
+                "scene": row.get("scene", ""),
+                "shift_pixels": row.get("shift_pixels", ""),
+                "ssim_real_right_vs_synth": row.get("ssim_real_right_vs_synth", row.get("ssim", "")),
+            }
             for row in reader
             if row.get("scene")
         ]
@@ -224,7 +229,7 @@ def write_metrics(metrics_file: Path, rows: list[dict[str, str | float | int]]) 
 
     ensure_parent(metrics_file)
     with metrics_file.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["scene", "shift_pixels", "ssim"])
+        writer = csv.DictWriter(handle, fieldnames=["scene", "shift_pixels", "ssim_real_right_vs_synth"])
         writer.writeheader()
         writer.writerows(merged_rows)
 
@@ -239,9 +244,10 @@ def write_scene_metadata(scene_output_dir: Path, scene_name: str, shift_pixels: 
                 f"scene: {scene_name}",
                 "generator: depth-aware O1 synthesis",
                 "im0.png: original left image copied from the source scene",
-                "im1.png: synthetic right image created by disparity-guided reprojection of im0.png",
-                f"target_max_shift_pixels: {abs(shift_pixels)}",
-                "disp0.pfm: rescaled left-view disparity derived from the source disp0.pfm",
+                "im1.png: synthetic right image created by direct reprojection of im0.png using the source disp0.pfm",
+                f"projection_direction: {'right_view' if shift_pixels >= 0 else 'left_view'}",
+                "disp0.pfm: filtered left-view disparity derived directly from the source disp0.pfm",
+                "metric: SSIM(real source im1.png, synthetic im1.png)",
                 f"calib.txt: {'copied' if calib_copied else 'missing in source scene'}",
             ]
         )
@@ -364,6 +370,7 @@ def run(config: O1Config, max_scenes: int | None, dry_run: bool, scene_name: str
     for scene_dir in scenes:
         # O1 直接复用场景自带的参考视差，把左图重投影成新的合成右图。
         left = load_rgb(scene_dir / "im0.png")
+        real_right = load_rgb(scene_dir / "im1.png")
         disparity_path = scene_dir / "disp0.pfm"
         if not disparity_path.exists():
             failed_scenes.append(scene_dir.name)
@@ -375,7 +382,7 @@ def run(config: O1Config, max_scenes: int | None, dry_run: bool, scene_name: str
 
         source_disparity = read_pfm(disparity_path)
         synthetic, disparity = synthesize_depth_aware_stereo(left, source_disparity, config.shift_pixels)
-        ssim_score = compute_ssim(left, synthetic)
+        ssim_score = compute_ssim(real_right, synthetic)
         scene_output_dir = config.synthetic_dir / scene_dir.name
         scene_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -386,10 +393,16 @@ def run(config: O1Config, max_scenes: int | None, dry_run: bool, scene_name: str
 
         calib_copied = copy_if_exists(scene_dir / "calib.txt", scene_output_dir / "calib.txt")
         write_scene_metadata(scene_output_dir, scene_dir.name, config.shift_pixels, calib_copied)
-        metric_rows.append({"scene": scene_dir.name, "shift_pixels": config.shift_pixels, "ssim": f"{ssim_score:.6f}"})
+        metric_rows.append(
+            {
+                "scene": scene_dir.name,
+                "shift_pixels": config.shift_pixels,
+                "ssim_real_right_vs_synth": f"{ssim_score:.6f}",
+            }
+        )
         print(
             f"Wrote synthetic scene: {scene_output_dir} "
-            f"(calib.txt copied: {'yes' if calib_copied else 'no'}, SSIM: {ssim_score:.6f})"
+            f"(calib.txt copied: {'yes' if calib_copied else 'no'}, SSIM real_right_vs_synth: {ssim_score:.6f})"
         )
 
     if failed_scenes:
@@ -399,7 +412,7 @@ def run(config: O1Config, max_scenes: int | None, dry_run: bool, scene_name: str
         return 1 if failed_scenes else 0
 
     write_metrics(config.metrics_file, metric_rows)
-    print(f"Wrote SSIM summary: {config.metrics_file}")
+    print(f"Wrote SSIM(real_right, synth) summary: {config.metrics_file}")
     return 1 if failed_scenes else 0
 
 

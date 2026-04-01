@@ -25,7 +25,7 @@ def _toy_rgb_image(height: int = 4, width: int = 6) -> np.ndarray:
 
 
 class O1SynthesisTests(unittest.TestCase):
-    def test_scale_reference_disparity_respects_target_shift(self) -> None:
+    def test_scale_reference_disparity_keeps_real_range(self) -> None:
         reference = np.array(
             [
                 [0.0, 2.0, 4.0, 8.0],
@@ -37,8 +37,8 @@ class O1SynthesisTests(unittest.TestCase):
         scaled = scale_reference_disparity(reference, 8)
 
         self.assertEqual(scaled.shape, reference.shape)
-        self.assertGreater(float(np.max(scaled)), 6.0)
-        self.assertLessEqual(float(np.max(scaled)), 8.0)
+        self.assertGreater(float(np.max(scaled)), 40.0)
+        self.assertLessEqual(float(np.max(scaled)), 96.0)
         self.assertAlmostEqual(float(scaled[0, 0]), 0.0, places=4)
         self.assertGreater(float(scaled[1, 3]), float(scaled[0, 3]))
 
@@ -57,15 +57,15 @@ class O1SynthesisTests(unittest.TestCase):
 
     def test_depth_aware_synthesis_returns_non_uniform_result(self) -> None:
         image = _toy_rgb_image(height=6, width=8)
-        reference = np.tile(np.array([0.0, 1.0, 2.0, 4.0, 8.0, 8.0, 4.0, 1.0], dtype=np.float32), (6, 1))
+        reference = np.tile(np.array([0.0, 1.0, 2.0, 4.0, 16.0, 16.0, 8.0, 2.0], dtype=np.float32), (6, 1))
 
         synthetic, disparity = synthesize_depth_aware_stereo(image, reference, 8)
 
         self.assertEqual(synthetic.shape, image.shape)
         self.assertEqual(disparity.shape, image.shape[:2])
         self.assertFalse(np.array_equal(synthetic, image))
-        self.assertGreater(float(np.max(disparity)), 4.0)
-        self.assertLessEqual(float(np.max(disparity)), 8.0)
+        self.assertGreater(float(np.max(disparity)), 8.0)
+        self.assertLessEqual(float(np.max(disparity)), 16.0)
 
     def test_fill_projection_holes_uses_neighbour_propagation(self) -> None:
         projected = np.array(
