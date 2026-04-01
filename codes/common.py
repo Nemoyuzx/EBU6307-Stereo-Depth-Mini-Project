@@ -68,21 +68,10 @@ def load_rgb(path: Path) -> Any:
     return np.asarray(Image.open(path).convert("RGB"))
 
 
-def load_bgr(path: Path) -> Any:
-    """以 OpenCV 默认的 BGR 排列读取彩色图像，供特征提取与匹配流程使用。"""
-    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
-    if image is None:
-        raise FileNotFoundError(f"Could not read image: {path}")
-    return image
-
-
 def load_gray(path: Path) -> Any:
-    """读取灰度图。优先使用 OpenCV；若没有 cv2，则用 RGB 图像按亮度公式手工转灰度。"""
+    """读取灰度图像，供只需要单通道亮度信息的目标模块复用。"""
 
-    image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-    if image is None:
-        raise FileNotFoundError(f"Could not read image: {path}")
-    return image
+    return np.asarray(Image.open(path).convert("L"))
 
 
 def read_image_with_sips(path: Path) -> Any:

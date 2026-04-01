@@ -3,15 +3,18 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import cv2
 import numpy as np
+from scipy import ndimage
 
-from entry_utils import run_objective_entry
-from common import discover_scenes, filter_scene_dirs, load_bgr, load_gray, write_scene_text
+
+from common import discover_scenes, filter_scene_dirs, write_scene_text
 from config import O2Config
 
 # 这一组列名既决定 CSV 的写出顺序，也决定旧指标文件在回读时按什么字段补齐。
@@ -41,6 +44,338 @@ DISTINCT_TRANSFORM_FAMILIES = (
 MetricValue = str | float | int
 MetricRow = dict[str, MetricValue]
 TransformParams = dict[str, MetricValue]
+
+
+@dataclass(frozen=True)
+class ManualKeypoint:
+    x: float
+    y: float
+    size: float
+    angle: float
+    response: float
+    octave: int
+    layer: int
+    sigma: float
+
+    @property
+    def pt(self) -> tuple[float, float]:
+        return (self.x, self.y)
+
+
+@dataclass(frozen=True)
+class ManualMatch:
+    queryIdx: int
+    trainIdx: int
+    distance: float
+
+
+@dataclass(frozen=True)
+class _ScaleSpaceCandidate:
+    x: int
+    y: int
+    octave: int
+    layer: int
+    sigma: float
+    response: float
+
+
+class ManualSiftDetector:
+    def __init__(self, max_features: int, contrast_threshold: float) -> None:
+        self.max_features = max(1, int(max_features))  # 最多保留多少个关键点，避免后续描述与匹配数量失控。
+        self.contrast_threshold = max(float(contrast_threshold), 1e-4)  # DoG 极值的最小对比度阈值，越大越严格。
+        self.scales_per_octave = 3  # 每个 octave 细分成多少个尺度层，用来构建高斯/DoG 金字塔。
+        self.base_sigma = 1.6  # SIFT 基础高斯模糊标准差，决定金字塔第一层的平滑强度。
+        self.max_octaves = 4  # 最多构建多少个 octave，控制跨尺度检测范围。
+        self.edge_threshold = 10.0  # 边缘响应剔除阈值，用 Hessian 主曲率比过滤细长边缘点。
+
+    def detectAndCompute(self, image: Any, mask: Any) -> tuple[list[ManualKeypoint], np.ndarray | None]:
+        if mask is not None:
+            raise NotImplementedError("ManualSiftDetector does not support masks.")
+
+        gray = np.asarray(image, dtype=np.float32)
+        if gray.ndim != 2:
+            raise ValueError("ManualSiftDetector expects a 2D grayscale image.")
+        if gray.size == 0:
+            return [], None
+        if float(gray.max(initial=0.0)) > 1.0:
+            gray /= 255.0
+
+        gaussian_pyramid, dog_pyramid, sigma_pyramid = self._build_scale_space(gray)
+        gradient_pyramid = self._build_gradient_pyramid(gaussian_pyramid)
+        candidates = self._detect_candidates(dog_pyramid, sigma_pyramid)
+        if not candidates:
+            return [], None
+
+        selected_candidates = self._suppress_candidates(candidates)
+        keypoints: list[ManualKeypoint] = []
+        descriptors: list[np.ndarray] = []
+
+        for candidate in selected_candidates:
+            magnitude, orientation = gradient_pyramid[candidate.octave][candidate.layer]
+            angle = self._assign_orientation(magnitude, orientation, candidate.x, candidate.y, candidate.sigma)
+            if angle is None:
+                continue
+            descriptor = self._build_descriptor(magnitude, orientation, candidate.x, candidate.y, candidate.sigma, angle)
+            if descriptor is None:
+                continue
+
+            scale_factor = float(2 ** candidate.octave)
+            keypoints.append(
+                ManualKeypoint(
+                    x=float(candidate.x * scale_factor),
+                    y=float(candidate.y * scale_factor),
+                    size=float(candidate.sigma * scale_factor * 2.0),
+                    angle=float(angle),
+                    response=float(candidate.response),
+                    octave=candidate.octave,
+                    layer=candidate.layer,
+                    sigma=float(candidate.sigma * scale_factor),
+                )
+            )
+            descriptors.append(descriptor)
+            if len(keypoints) >= self.max_features:
+                break
+
+        if not descriptors:
+            return [], None
+        return keypoints, np.asarray(descriptors, dtype=np.float32)
+
+    def _build_scale_space(self, image: np.ndarray) -> tuple[list[list[np.ndarray]], list[list[np.ndarray]], list[list[float]]]:
+        gaussian_pyramid: list[list[np.ndarray]] = []
+        dog_pyramid: list[list[np.ndarray]] = []
+        sigma_pyramid: list[list[float]] = []
+
+        current = ndimage.gaussian_filter(image, sigma=self.base_sigma, mode="reflect").astype(np.float32)
+        min_dimension = min(image.shape[:2])
+        dynamic_octaves = max(1, int(math.floor(math.log2(max(min_dimension, 16)))) - 4)
+        octave_count = max(1, min(self.max_octaves, dynamic_octaves))
+        k = 2.0 ** (1.0 / self.scales_per_octave)
+        levels_per_octave = self.scales_per_octave + 3
+
+        for octave in range(octave_count):
+            octave_gaussians = [current]
+            octave_sigmas = [self.base_sigma]
+            for layer in range(1, levels_per_octave):
+                prev_sigma = self.base_sigma * (k ** (layer - 1))
+                total_sigma = self.base_sigma * (k ** layer)
+                incremental_sigma = math.sqrt(max(total_sigma * total_sigma - prev_sigma * prev_sigma, 1e-6))
+                octave_gaussians.append(
+                    ndimage.gaussian_filter(octave_gaussians[-1], sigma=incremental_sigma, mode="reflect").astype(np.float32)
+                )
+                octave_sigmas.append(total_sigma)
+
+            gaussian_pyramid.append(octave_gaussians)
+            sigma_pyramid.append(octave_sigmas)
+            dog_pyramid.append(
+                [octave_gaussians[layer + 1] - octave_gaussians[layer] for layer in range(len(octave_gaussians) - 1)]
+            )
+
+            next_base = octave_gaussians[self.scales_per_octave][::2, ::2]
+            if min(next_base.shape[:2]) < 24:
+                break
+            current = next_base.astype(np.float32)
+
+        return gaussian_pyramid, dog_pyramid, sigma_pyramid
+
+    def _build_gradient_pyramid(self, gaussian_pyramid: list[list[np.ndarray]]) -> list[list[tuple[np.ndarray, np.ndarray]]]:
+        gradient_pyramid: list[list[tuple[np.ndarray, np.ndarray]]] = []
+        for octave_images in gaussian_pyramid:
+            octave_gradients: list[tuple[np.ndarray, np.ndarray]] = []
+            for image in octave_images:
+                grad_x = ndimage.sobel(image, axis=1, mode="reflect")
+                grad_y = ndimage.sobel(image, axis=0, mode="reflect")
+                magnitude = np.hypot(grad_x, grad_y).astype(np.float32)
+                orientation = (np.degrees(np.arctan2(grad_y, grad_x)) + 360.0) % 360.0
+                octave_gradients.append((magnitude, orientation.astype(np.float32)))
+            gradient_pyramid.append(octave_gradients)
+        return gradient_pyramid
+
+    def _detect_candidates(
+        self,
+        dog_pyramid: list[list[np.ndarray]],
+        sigma_pyramid: list[list[float]],
+    ) -> list[_ScaleSpaceCandidate]:
+        candidates: list[_ScaleSpaceCandidate] = []
+        contrast_floor = max(0.001, self.contrast_threshold / float(self.scales_per_octave))
+
+        for octave, octave_dogs in enumerate(dog_pyramid):
+            for layer in range(1, len(octave_dogs) - 1):
+                previous = octave_dogs[layer - 1]
+                current = octave_dogs[layer]
+                following = octave_dogs[layer + 1]
+                stacked = np.stack([previous, current, following], axis=0)
+                local_max = ndimage.maximum_filter(stacked, size=(3, 3, 3), mode="nearest")[1]
+                local_min = ndimage.minimum_filter(stacked, size=(3, 3, 3), mode="nearest")[1]
+                candidate_mask = (
+                    ((current >= local_max) | (current <= local_min))
+                    & (np.abs(current) >= contrast_floor)
+                )
+
+                border = 8
+                candidate_mask[:border, :] = False
+                candidate_mask[-border:, :] = False
+                candidate_mask[:, :border] = False
+                candidate_mask[:, -border:] = False
+
+                ys, xs = np.nonzero(candidate_mask)
+                for y, x in zip(ys.tolist(), xs.tolist()):
+                    if not self._passes_edge_response(current, y, x):
+                        continue
+                    candidates.append(
+                        _ScaleSpaceCandidate(
+                            x=int(x),
+                            y=int(y),
+                            octave=octave,
+                            layer=layer,
+                            sigma=float(sigma_pyramid[octave][layer]),
+                            response=float(abs(current[y, x])),
+                        )
+                    )
+
+        candidates.sort(key=lambda candidate: candidate.response, reverse=True)
+        return candidates
+
+    def _passes_edge_response(self, dog_image: np.ndarray, y: int, x: int) -> bool:
+        dxx = float(dog_image[y, x + 1] + dog_image[y, x - 1] - 2.0 * dog_image[y, x])
+        dyy = float(dog_image[y + 1, x] + dog_image[y - 1, x] - 2.0 * dog_image[y, x])
+        dxy = float(
+            dog_image[y + 1, x + 1]
+            - dog_image[y + 1, x - 1]
+            - dog_image[y - 1, x + 1]
+            + dog_image[y - 1, x - 1]
+        ) / 4.0
+        trace = dxx + dyy
+        determinant = dxx * dyy - dxy * dxy
+        if determinant <= 1e-10:
+            return False
+        curvature_ratio = (trace * trace) / determinant
+        threshold = ((self.edge_threshold + 1.0) ** 2) / self.edge_threshold
+        return curvature_ratio < threshold
+
+    def _suppress_candidates(self, candidates: list[_ScaleSpaceCandidate]) -> list[_ScaleSpaceCandidate]:
+        selected: list[_ScaleSpaceCandidate] = []
+        occupancy: dict[tuple[int, int], list[tuple[float, float]]] = {}
+        for candidate in candidates:
+            scale_factor = float(2 ** candidate.octave)
+            image_x = float(candidate.x * scale_factor)
+            image_y = float(candidate.y * scale_factor)
+            grid_cell = (int(image_x // 4.0), int(image_y // 4.0))
+            min_distance = max(3.0, candidate.sigma * scale_factor)
+            too_close = False
+            for grid_y in range(grid_cell[1] - 1, grid_cell[1] + 2):
+                for grid_x in range(grid_cell[0] - 1, grid_cell[0] + 2):
+                    for existing_x, existing_y in occupancy.get((grid_x, grid_y), []):
+                        dx = image_x - existing_x
+                        dy = image_y - existing_y
+                        if dx * dx + dy * dy < min_distance * min_distance:
+                            too_close = True
+                            break
+                    if too_close:
+                        break
+                if too_close:
+                    break
+            if too_close:
+                continue
+
+            occupancy.setdefault(grid_cell, []).append((image_x, image_y))
+            selected.append(candidate)
+            if len(selected) >= max(self.max_features * 6, self.max_features):
+                break
+        return selected
+
+    def _assign_orientation(
+        self,
+        magnitude: np.ndarray,
+        orientation: np.ndarray,
+        x: int,
+        y: int,
+        sigma: float,
+    ) -> float | None:
+        window_sigma = max(1.0, 1.5 * sigma)
+        radius = max(3, int(round(3.0 * window_sigma)))
+        if (
+            y - radius < 0
+            or y + radius >= magnitude.shape[0]
+            or x - radius < 0
+            or x + radius >= magnitude.shape[1]
+        ):
+            return None
+
+        histogram = np.zeros(36, dtype=np.float32)
+        for yy in range(y - radius, y + radius + 1):
+            for xx in range(x - radius, x + radius + 1):
+                dx = float(xx - x)
+                dy = float(yy - y)
+                weight = math.exp(-(dx * dx + dy * dy) / (2.0 * window_sigma * window_sigma))
+                bin_index = int(orientation[yy, xx] // 10.0) % 36
+                histogram[bin_index] += weight * float(magnitude[yy, xx])
+
+        histogram = self._smooth_circular_histogram(histogram, passes=4)
+        dominant_bin = int(np.argmax(histogram))
+        return float(dominant_bin * 10.0)
+
+    def _build_descriptor(
+        self,
+        magnitude: np.ndarray,
+        orientation: np.ndarray,
+        x: int,
+        y: int,
+        sigma: float,
+        angle: float,
+    ) -> np.ndarray | None:
+        sigma_safe = max(1.0, sigma)
+        radius = max(8, int(round(8.0 * sigma_safe)))
+        if (
+            y - radius < 1
+            or y + radius >= magnitude.shape[0] - 1
+            or x - radius < 1
+            or x + radius >= magnitude.shape[1] - 1
+        ):
+            return None
+
+        descriptor = np.zeros((4, 4, 8), dtype=np.float32)
+        angle_rad = math.radians(angle)
+        cos_angle = math.cos(angle_rad)
+        sin_angle = math.sin(angle_rad)
+
+        for yy in range(y - radius, y + radius + 1):
+            for xx in range(x - radius, x + radius + 1):
+                dx = float(xx - x)
+                dy = float(yy - y)
+                rotated_x = (cos_angle * dx + sin_angle * dy) / sigma_safe
+                rotated_y = (-sin_angle * dx + cos_angle * dy) / sigma_safe
+                if abs(rotated_x) >= 8.0 or abs(rotated_y) >= 8.0:
+                    continue
+                cell_x = int((rotated_x + 8.0) // 4.0)
+                cell_y = int((rotated_y + 8.0) // 4.0)
+                if cell_x < 0 or cell_x >= 4 or cell_y < 0 or cell_y >= 4:
+                    continue
+
+                relative_angle = (float(orientation[yy, xx]) - angle) % 360.0
+                orientation_bin = int(relative_angle // 45.0) % 8
+                weight = math.exp(-(rotated_x * rotated_x + rotated_y * rotated_y) / 64.0)
+                descriptor[cell_y, cell_x, orientation_bin] += weight * float(magnitude[yy, xx])
+
+        vector = descriptor.reshape(-1)
+        norm = float(np.linalg.norm(vector))
+        if norm < 1e-8:
+            return None
+        vector = vector / norm
+        vector = np.clip(vector, 0.0, 0.2)
+        renorm = float(np.linalg.norm(vector))
+        if renorm < 1e-8:
+            return None
+        return (vector / renorm).astype(np.float32)
+
+    def _smooth_circular_histogram(self, histogram: np.ndarray, passes: int) -> np.ndarray:
+        smoothed = histogram.astype(np.float32, copy=True)
+        for _ in range(passes):
+            smoothed = (
+                np.roll(smoothed, 1)
+                + 2.0 * smoothed
+                + np.roll(smoothed, -1)
+            ) / 4.0
+        return smoothed
 
 
 def read_metrics(metrics_file: Path) -> list[MetricRow]:
@@ -84,28 +419,99 @@ def write_metrics(metrics_file: Path, rows: list[MetricRow]) -> None:
         writer.writerows(merged_rows)
 
 
-def create_sift_detector(max_features: int, contrast_threshold: float) -> Any:
-    """创建 SIFT 检测器，并在环境不支持 SIFT 时给出明确报错。"""
+def create_sift_detector(max_features: int, contrast_threshold: float) -> ManualSiftDetector:
+    """创建手写 SIFT 检测器。"""
 
-    sift_create = cast(Any, getattr(cv2, "SIFT_create", None))
-    if sift_create is None:
-        raise RuntimeError("OpenCV SIFT is unavailable in this environment. Install an OpenCV build with SIFT support.")
-    # contrastThreshold 对应 SIFT 第 2 步里的低对比度点剔除强度；
-    # nfeatures 则限制最终保留下来的关键点数量，便于控制工程侧开销。
-    return sift_create(nfeatures=max_features, contrastThreshold=contrast_threshold)
+    return ManualSiftDetector(max_features=max_features, contrast_threshold=contrast_threshold)
 
 
-def draw_keypoints(image_bgr: Any, keypoints: Any) -> Any:
+def draw_keypoints(image_bgr: Any, keypoints: list[ManualKeypoint]) -> Any:
     """把关键点以可视化形式画到图像上，便于结果检查。"""
 
-    draw_keypoints_fn = cast(Any, cv2.drawKeypoints)
-    # 这里画出的圆圈大小和朝向，来自 SIFT 第 2、3 步之后得到的关键点位置、尺度和主方向。
-    return draw_keypoints_fn(image_bgr, keypoints, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+    canvas = np.asarray(image_bgr).copy()
+    for keypoint in keypoints:
+        center = (int(round(keypoint.x)), int(round(keypoint.y)))
+        radius = max(2, int(round(keypoint.size / 2.0)))
+        angle_rad = math.radians(keypoint.angle)
+        tip = (
+            int(round(center[0] + radius * math.cos(angle_rad))),
+            int(round(center[1] + radius * math.sin(angle_rad))),
+        )
+        cv2.circle(canvas, center, radius, (0, 255, 0), 1, lineType=cv2.LINE_AA)
+        cv2.line(canvas, center, tip, (0, 0, 255), 1, lineType=cv2.LINE_AA)
+    return canvas
 
 
-def _ratio_filtered_matches(knn_matches: Any, ratio_test: float) -> list[Any]:
+def draw_matches(
+    left_bgr: Any,
+    left_keypoints: list[ManualKeypoint],
+    right_bgr: Any,
+    right_keypoints: list[ManualKeypoint],
+    matches: list[ManualMatch],
+) -> Any:
+    """把匹配结果画到拼接画布上，便于人工检查。"""
+
+    left = np.asarray(left_bgr)
+    right = np.asarray(right_bgr)
+    output_height = max(left.shape[0], right.shape[0])
+    output_width = left.shape[1] + right.shape[1]
+    canvas = np.zeros((output_height, output_width, 3), dtype=np.uint8)
+    canvas[: left.shape[0], : left.shape[1]] = left
+    canvas[: right.shape[0], left.shape[1] : left.shape[1] + right.shape[1]] = right
+
+    x_offset = left.shape[1]
+    for index, match in enumerate(matches):
+        left_point = left_keypoints[match.queryIdx]
+        right_point = right_keypoints[match.trainIdx]
+        color = (
+            int((37 * index) % 192 + 48),
+            int((83 * index) % 192 + 48),
+            int((131 * index) % 192 + 48),
+        )
+        start = (int(round(left_point.x)), int(round(left_point.y)))
+        end = (int(round(right_point.x + x_offset)), int(round(right_point.y)))
+        cv2.circle(canvas, start, 3, color, -1, lineType=cv2.LINE_AA)
+        cv2.circle(canvas, end, 3, color, -1, lineType=cv2.LINE_AA)
+        cv2.line(canvas, start, end, color, 1, lineType=cv2.LINE_AA)
+    return canvas
+
+
+def _knn_match_descriptors(left_descriptors: np.ndarray, right_descriptors: np.ndarray, k: int) -> list[list[ManualMatch]]:
+    if left_descriptors.size == 0 or right_descriptors.size == 0:
+        return []
+
+    neighbor_count = max(1, min(int(k), right_descriptors.shape[0]))
+    left = np.asarray(left_descriptors, dtype=np.float32)
+    right = np.asarray(right_descriptors, dtype=np.float32)
+    distance_squared = (
+        np.sum(left * left, axis=1, keepdims=True)
+        + np.sum(right * right, axis=1)[None, :]
+        - 2.0 * left @ right.T
+    )
+    distance_squared = np.maximum(distance_squared, 0.0, dtype=np.float32)
+    distances = np.sqrt(distance_squared, dtype=np.float32)
+    nearest_indices = np.argpartition(distances, kth=neighbor_count - 1, axis=1)[:, :neighbor_count]
+
+    knn_matches: list[list[ManualMatch]] = []
+    for query_index in range(distances.shape[0]):
+        candidate_indices = nearest_indices[query_index]
+        ordered_indices = candidate_indices[np.argsort(distances[query_index, candidate_indices])]
+        knn_matches.append(
+            [
+                ManualMatch(
+                    queryIdx=query_index,
+                    trainIdx=int(train_index),
+                    distance=float(distances[query_index, train_index]),
+                )
+                for train_index in ordered_indices.tolist()
+            ]
+        )
+    return knn_matches
+
+
+def _ratio_filtered_matches(knn_matches: list[list[ManualMatch]], ratio_test: float) -> list[ManualMatch]:
     """对 KNN 匹配应用 Lowe ratio test。"""
-    filtered: list[Any] = []
+    filtered: list[ManualMatch] = []
     for pair in knn_matches:
         # 正常情况下 knnMatch(k=2) 会返回两个候选；极少数边界情况不足两个时，
         # 没法做 ratio test，直接跳过最稳妥。
@@ -118,13 +524,15 @@ def _ratio_filtered_matches(knn_matches: Any, ratio_test: float) -> list[Any]:
     return filtered
 
 
-def _mutual_ratio_matches(left_descriptors: Any, right_descriptors: Any, ratio_test: float) -> tuple[int, list[Any], list[Any]]:
+def _mutual_ratio_matches(
+    left_descriptors: np.ndarray,
+    right_descriptors: np.ndarray,
+    ratio_test: float,
+) -> tuple[int, list[ManualMatch], list[ManualMatch]]:
     """先做双向 KNN+ratio test，再取互为匹配的描述子对，减少偶然误匹配。"""
 
-    # SIFT 描述符默认用 L2 距离；这里显式指定，避免读代码时还要回忆 OpenCV 默认行为。
-    matcher = cv2.BFMatcher(cv2.NORM_L2)
-    forward_knn = matcher.knnMatch(left_descriptors, right_descriptors, k=2)
-    backward_knn = matcher.knnMatch(right_descriptors, left_descriptors, k=2)
+    forward_knn = _knn_match_descriptors(left_descriptors, right_descriptors, k=2)
+    backward_knn = _knn_match_descriptors(right_descriptors, left_descriptors, k=2)
     forward_ratio = _ratio_filtered_matches(forward_knn, ratio_test)
     backward_ratio = _ratio_filtered_matches(backward_knn, ratio_test)
     # 反向保留下来的匹配先编码成索引对，后面判断“是否互为最近邻”会更直接。
@@ -135,7 +543,11 @@ def _mutual_ratio_matches(left_descriptors: Any, right_descriptors: Any, ratio_t
     return len(forward_knn), forward_ratio, mutual
 
 
-def _geometric_inlier_matches(left_keypoints: Any, right_keypoints: Any, matches: list[Any]) -> tuple[list[Any], int]:
+def _geometric_inlier_matches(
+    left_keypoints: list[ManualKeypoint],
+    right_keypoints: list[ManualKeypoint],
+    matches: list[ManualMatch],
+) -> tuple[list[ManualMatch], int]:
     """使用基础矩阵 RANSAC 剔除几何上明显不合理的匹配。"""
 
     # 基础矩阵最少需要 8 对点；样本太少时强行做 RANSAC 只会让结果更不稳定。
@@ -158,7 +570,12 @@ def _geometric_inlier_matches(left_keypoints: Any, right_keypoints: Any, matches
     return inliers, int(mask.sum())
 
 
-def _select_geometry_aware_matches(left_keypoints: Any, right_keypoints: Any, ratio_filtered: list[Any], mutual_matches: list[Any]) -> tuple[list[Any], int]:
+def _select_geometry_aware_matches(
+    left_keypoints: list[ManualKeypoint],
+    right_keypoints: list[ManualKeypoint],
+    ratio_filtered: list[ManualMatch],
+    mutual_matches: list[ManualMatch],
+) -> tuple[list[ManualMatch], int]:
     """结合 mutual matching 和 RANSAC 结果选择更稳健的匹配集合。"""
     # 默认从单向 ratio test 结果开始，因为这是最宽松、召回率最高的候选集。
     candidate_matches = ratio_filtered
@@ -467,27 +884,28 @@ def run(
     scene_name: str | None,
 ) -> int:
     # “总共发现多少 scene”“这次实际会处理多少 scene”
-    discovered_scenes = discover_scenes(middlebury_root)
-    discovered_count = len(discovered_scenes)
-    scenes = filter_scene_dirs(discovered_scenes, scene_name)
+    scenes = discover_scenes(middlebury_root)
+    scenes_count = len(scenes)
+    scenes = filter_scene_dirs(scenes, scene_name)
 
     if max_scenes is not None:
         # 负数没有实际意义，直接按参数错误返回，比悄悄当作 0 或 None 更容易排查。
         if max_scenes < 0:
             print("--max-scenes must be zero or greater.", file=sys.stderr)
             return 2
-        scenes = scenes[:max_scenes]
-
-    # 关键路径和输出位置都打印 读哪里、写哪里、筛了哪些 scene
-    print(f"Repository root: {repo_root}")
-    print(f"Middlebury root: {middlebury_root}")
-    print(f"Discovered scenes with im0.png/im1.png: {discovered_count}")
-    print(f"O2 keypoint output dir: {config.keypoints_dir}")
-    print(f"O2 match output dir: {config.matches_dir}")
-    print(f"O2 metrics file: {config.metrics_file}")
+        scenes = scenes[:max_scenes]  #直接截断列表，保证处理顺序稳定。
+        
+    print(f"Repository root: {repo_root}") # 项目的根目录路径
+    print(f"Middlebury root: {middlebury_root}") # Middlebury 数据集的根目录
+    print(f"Discovered scenes with im0.png/im1.png: {scenes_count}") # 实际在数据集目录下识别到的有效场景文件夹
+    print(f"O2 keypoint output dir: {config.keypoints_dir}") # 关键点检测结果的输出目录
+    print(f"O2 match output dir: {config.matches_dir}") # 匹配结果的输出目录
+    print(f"O2 metrics file: {config.metrics_file}") # 所有场景评估指标的 CSV 文件路径
     if scene_name is not None:
         print(f"Scene filter: {scene_name}")
     print("Scenes to process: " + ", ".join(scene.name for scene in scenes) if scenes else "Scenes to process: none")
+    
+    #================================数据集目录检查================================
 
     #判定数据集指定目录是否存在
     if not middlebury_root.exists():
@@ -503,7 +921,7 @@ def run(
         return 1
 
     # 目录存在但没有任何合法 scene 时
-    if discovered_count == 0:
+    if scenes_count == 0:
         # dry-run / discovery-only 模式下，跳过检查
         if dry_run or max_scenes == 0:
             print("No valid scenes found. Discovery-only mode completed without processing.")
@@ -524,29 +942,34 @@ def run(
     if dry_run or max_scenes == 0:
         print("Dry run requested; no outputs were written.")
         return 0
+    
+    #===============================核心处理流程================================
 
     # detector 在整个 O2 过程中复用即可，没有必要为每个 scene 单独创建。
     detector = create_sift_detector(config.max_features, config.contrast_threshold)
-    # 输出目录在主循环之前统一建好，避免后面每个 scene 都做一次重复判定。
+    # 输出目录确认
     config.keypoints_dir.mkdir(parents=True, exist_ok=True)
     config.matches_dir.mkdir(parents=True, exist_ok=True)
 
-    # metric_rows 先在内存里累计，最后统一写 CSV，避免处理中途留下半截文件。
+    # metric_rows 保存每个 scene 的评估结果，最后会写到 CSV 里
     metric_rows: list[dict[str, str | int | float]] = []
     # 4 像素阈值不是 SIFT 算法本身的参数，而是这里定义“几何上算 repeatable”的工程判据。
     threshold_px = 4.0
 
     for scene_index, scene_dir in enumerate(scenes):
-        # O2 的左图固定取原始 im0；右图不是直接用 Middlebury 的 im1，
-        # 而是由左图生成一个带可控扰动的 transformed view，用来做 repeatability 评估。
-        original_bgr = load_bgr(scene_dir / "im0.png")
-        original_gray = load_gray(scene_dir / "im0.png")
+        # O2 的左图固定取原始 im0
+        # 而是由左图生成一个带可控扰动的 transformed view
+        original_path = scene_dir / "im0.png"
+        original_bgr = cv2.imread(str(original_path), cv2.IMREAD_COLOR)
+        if original_bgr is None:
+            raise FileNotFoundError(f"Could not read image: {original_path}")
+        original_gray = cv2.cvtColor(original_bgr, cv2.COLOR_BGR2GRAY) # 原图转灰度
         transformed_bgr, homography, transform_family, random_seed, transform_params = generate_transformed_view(
             original_bgr,
             scene_dir.name,
             scene_index,
         )
-        # SIFT 检测和描述通常在灰度图上做，这里显式转灰度，避免 OpenCV 内部隐式转换带来歧义。
+        # 转换图像同样转灰度，准备后续 SIFT 处理
         transformed_gray = cv2.cvtColor(transformed_bgr, cv2.COLOR_BGR2GRAY)
 
         # 在整张 original_gray 上执行一次完整 SIFT；第二个参数传 None，表示不额外提供 mask，
@@ -558,7 +981,7 @@ def run(
         # 3) 然后给每个保留下来的关键点分配主方向，因此 keypoint 的 pt / size / angle
         #    在这里都已经是可直接使用的稳定属性。
         # 返回的 original_descriptors 则对应 SIFT 第 4 步：围绕每个 original_keypoints 统计局部梯度，
-        # 为每个关键点生成一个 128 维描述符，供后面的 BFMatcher 做匹配。
+        # 为每个关键点生成一个 128 维描述符，供后面的手写 L2 KNN 匹配使用。
         original_keypoints, original_descriptors = detector.detectAndCompute(original_gray, None)
         # 对变换后的 transformed_gray 重复同一套 detect + compute 流程，得到另一组
         # transformed_keypoints / transformed_descriptors；下面的 repeatability 评估
@@ -577,9 +1000,8 @@ def run(
             and len(transformed_descriptors) > 0
         ):
             # 这里开始不再属于 SIFT 本体，而是对第 4 步产出的描述符做项目级评估。
-            matcher = cv2.BFMatcher(cv2.NORM_L2)
             # 先对 128 维描述符做 KNN 最近邻匹配，建立候选对应关系。
-            knn_matches = matcher.knnMatch(original_descriptors, transformed_descriptors, k=2)
+            knn_matches = _knn_match_descriptors(original_descriptors, transformed_descriptors, k=2)
             raw_matches = len(knn_matches)
             # Lowe ratio test 用来剔除“最近邻和次近邻太接近”的歧义匹配。
             ratio_matches = _ratio_filtered_matches(knn_matches, float(config.ratio_test))
@@ -630,17 +1052,14 @@ def run(
             ],
         )
 
-        # drawMatches 图太密会完全看不清，所以这里只画最可靠的前若干条 repeatable matches。
+        # 匹配图太密会完全看不清，所以这里只画最可靠的前若干条 repeatable matches。
         draw_count = min(len(repeatable_matches), config.max_draw_matches)
-        draw_matches_fn = cast(Any, cv2.drawMatches)
-        match_image = draw_matches_fn(
+        match_image = draw_matches(
             original_bgr,
             original_keypoints,
             transformed_bgr,
             transformed_keypoints,
             repeatable_matches[:draw_count],
-            None,
-            flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
         )
         cv2.imwrite(str(match_scene_dir / "sift_matches.png"), match_image)
         # 匹配 README 更偏向评估视角：这次总共匹配了多少、ratio 之后剩多少、几何上真正 repeatable 的有多少。
@@ -693,5 +1112,7 @@ def run(
 
 
 if __name__ == '__main__':
-    # 统一走 run_objective_entry，让 O2 的命令行行为和 O1/O3/O4 保持一致。
+    # 统一走 run_objective_entry
+    from entry_utils import run_objective_entry
+
     raise SystemExit(run_objective_entry('o2', __file__))

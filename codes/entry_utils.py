@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import sys
+import os
 
 from cli import main as cli_main
 
@@ -41,28 +42,28 @@ def run_objective_entry(objective: str, module_file: str, argv: list[str] | None
 
     cli_argv = [
         'cli.py',
-        '--config', str(args.config),
-        '--profile', args.profile,
-        '--objective', objective,
+        '--config', str(args.config),  # 指定 YAML 配置文件路径，里面定义数据集和输出目录等路径配置。
+        '--profile', args.profile,  # 选择配置文件中的 profile，决定当前运行采用哪组路径与环境设置。
+        '--objective', objective,  # 告诉统一 CLI 当前要执行的是哪个目标模块，例如 O1/O2/O3/O4。
     ]
     if args.max_scenes is not None:
-        cli_argv.extend(['--max-scenes', str(args.max_scenes)])
+        cli_argv.extend(['--max-scenes', str(args.max_scenes)])  # 限制本次最多处理多少个 scene，传 0 时只做发现不实际处理
     if args.scene_name:
-        cli_argv.extend(['--scene-name', args.scene_name])
+        cli_argv.extend(['--scene-name', args.scene_name])  # 只运行名字完全匹配的单个 scene
     if args.dry_run:
-        cli_argv.append('--dry-run')
+        cli_argv.append('--dry-run')  # 只打印发现结果和配置，不写任何输出文件
     if args.validate_results:
-        cli_argv.append('--validate-results')
+        cli_argv.append('--validate-results')  # 仅检查已有结果是否齐全有效，不重新计算
     if args.o4_execution_mode is not None:
-        cli_argv.extend(['--o4-execution-mode', args.o4_execution_mode])
+        cli_argv.extend(['--o4-execution-mode', args.o4_execution_mode])  # 选择 O4 的执行模式，例如 baseline 或 dinov2_cost_volume
     if args.o4_dinov2_model is not None:
-        cli_argv.extend(['--o4-dinov2-model', args.o4_dinov2_model])
+        cli_argv.extend(['--o4-dinov2-model', args.o4_dinov2_model])  # 指定 O4 使用的 DINOv2 模型名称
     if args.o4_dinov2_checkpoint is not None:
-        cli_argv.extend(['--o4-dinov2-checkpoint', str(args.o4_dinov2_checkpoint)])
+        cli_argv.extend(['--o4-dinov2-checkpoint', str(args.o4_dinov2_checkpoint)])  # 指定 O4 使用的 DINOv2 权重文件路径
     if args.o4_dinov2_repo is not None:
-        cli_argv.extend(['--o4-dinov2-repo', str(args.o4_dinov2_repo)])
+        cli_argv.extend(['--o4-dinov2-repo', str(args.o4_dinov2_repo)])  # 指定 O4 加载 DINOv2 代码或仓库的本地路径
     if args.o4_regression_mode is not None:
-        cli_argv.extend(['--o4-regression-mode', args.o4_regression_mode])
+        cli_argv.extend(['--o4-regression-mode', args.o4_regression_mode])  # 选择 O4 回归视差时采用的输出方式
 
     if str(codes_dir) not in sys.path:
         sys.path.insert(0, str(codes_dir))
@@ -71,7 +72,6 @@ def run_objective_entry(objective: str, module_file: str, argv: list[str] | None
     try:
         sys.argv = cli_argv
         # Make config relative paths stable whether invoked from repo root or codes/.
-        import os
         os.chdir(repo_root)
         return cli_main()
     finally:
