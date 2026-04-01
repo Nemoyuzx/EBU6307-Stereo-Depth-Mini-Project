@@ -750,6 +750,7 @@ def _knn_match_descriptors(left_descriptors: np.ndarray, right_descriptors: np.n
     neighbor_count = max(1, min(int(k), right_descriptors.shape[0]))
     left = np.asarray(left_descriptors, dtype=np.float32)
     right = np.asarray(right_descriptors, dtype=np.float32)
+    # Compute Euclidean distance 计算欧氏距离，得到一个 shape=(left_count, right_count) 的距离矩阵，distance[i,j] 是 left_descriptors[i] 和 right_descriptors[j] 之间的距离。
     distance_squared = (
         np.sum(left * left, axis=1, keepdims=True)
         + np.sum(right * right, axis=1)[None, :]
@@ -786,7 +787,7 @@ def _ratio_filtered_matches(knn_matches: list[list[ManualMatch]], ratio_test: fl
             continue
         first, second = pair
         # 最近邻必须显著优于次近邻，才认为这个描述符匹配“足够明确”。
-        if first.distance < ratio_test * second.distance:
+        if first.distance < ratio_test * second.distance:  #Compute the ratio
             filtered.append(first)
     return filtered
 
@@ -1265,7 +1266,7 @@ def run(
             knn_matches = _knn_match_descriptors(original_descriptors, transformed_descriptors, k=2)
             raw_matches = len(knn_matches)
             # Lowe ratio test 用来剔除“最近邻和次近邻太接近”的歧义匹配。
-            ratio_matches = _ratio_filtered_matches(knn_matches, float(config.ratio_test))
+            ratio_matches = _ratio_filtered_matches(knn_matches, float(config.ratio_test)) # 0.8
             # 再结合已知随机变换的真实几何关系，筛出真正可重复的关键点对应。
             repeatable_matches = _repeatable_matches(
                 original_keypoints,
