@@ -456,14 +456,11 @@ class ManualSiftDetector:
         return selected
         
 
-    def _assign_orientations(self, magnitude: np.ndarray, orientation: np.ndarray, x: float, y: float, sigma: float,
-    ) -> list[float]:
-        """ 第三步：方向分配。 opencv 使用GLOH
-        1. 固定取关键点周围的16x16窗口；
-        2. 把窗口切成2x2小块，为每个小块先聚合出一个梯度方向和梯度强度；
-        3. 丢弃过弱的小块梯度，避免弱纹理和噪声扰动主方向；
-        4. 将剩余小块的高斯加权梯度幅值累积到36-bin方向直方图中。 """
+    def _assign_orientations(self, magnitude: np.ndarray, orientation: np.ndarray, x: float, y: float, sigma: float) -> list[float]:
+        """第三步：方向分配。"""
+
         del sigma
+        # 1. 固定取关键点周围的16x16窗口。
         half_window = self.orientation_window_size // 2
         block_size = self.orientation_block_size
         window_start_y = int(round(y)) - half_window
@@ -478,6 +475,7 @@ class ManualSiftDetector:
         ):
             return []
 
+        # 2. 把窗口切成2x2小块，为每个小块先聚合出一个梯度方向和梯度强度。
         block_votes: list[tuple[float, float, float, float]] = []
         blocks_per_side = self.orientation_window_size // block_size
         for block_y in range(blocks_per_side):
@@ -503,14 +501,16 @@ class ManualSiftDetector:
 
         histogram = np.zeros(36, dtype=np.float32)
         local_max_magnitude = max(vote[0] for vote in block_votes)
+        # 3. 丢弃过弱的小块梯度，避免弱纹理和噪声扰动主方向。
         weak_gradient_floor = max(1e-6, self.orientation_magnitude_ratio * local_max_magnitude)
         window_sigma = max(1.0, self.orientation_window_size / 2.0)
+        # 4. 将剩余小块的高斯加权梯度幅值累积到36-bin方向直方图中。
         for sample_magnitude, sample_angle, sample_x, sample_y in block_votes:
             if sample_magnitude < weak_gradient_floor:
                 continue
             dx = float(sample_x - x)
             dy = float(sample_y - y)
-            # 方向分配阶段先聚合2x2块梯度，再做弱梯度剔除和高斯加权累积，严格贴合课件里的流程。
+            # 方向分配阶段先聚合2x2块梯度，再做弱梯度剔除和高斯加权累积
             weight = math.exp(-(dx * dx + dy * dy) / (2.0 * window_sigma * window_sigma))
             bin_index = int(sample_angle // 10.0) % 36
             histogram[bin_index] += weight * sample_magnitude
@@ -561,11 +561,8 @@ class ManualSiftDetector:
         return peak_angles
 
     def _build_descriptor(self, magnitude: np.ndarray, orientation: np.ndarray, x: float, y: float, sigma: float, angle: float ) -> np.ndarray | None:
-        """ 第四步：关键点描述子生成。
-        1. 先按关键点的主方向和尺度把邻域归一化到16x16窗口。
-        2. 再把这个16x16窗口切成4x4个子区域，每个子区域统计8个方向bin。
-        3. 梯度幅值先乘一个高斯权重，方差取半个窗口宽度，让中心区域平滑地主导描述子。
-        4. 最后把4x4x8拼成128维向量，做L2归一化、0.2截断，再次归一化。"""
+        """第四步：关键点描述子生成。"""
+        # 1. 先按关键点的主方向和尺度把邻域归一化到16x16窗口。
         sigma_safe = max(1.0, sigma)
         half_window = self.descriptor_window_size / 2.0
         block_size = self.descriptor_window_size / float(self.descriptor_block_count)
@@ -596,11 +593,11 @@ class ManualSiftDetector:
             for xx in range(min_x, max_x + 1):
                 dx = float(xx - x)
                 dy = float(yy - y)
-                # 先按主方向旋转，再按 sigma 归一化，把邻域统一映射到固定的16x16描述子窗口里。
                 rotated_x = (cos_angle * dx + sin_angle * dy) / sigma_safe
                 rotated_y = (-sin_angle * dx + cos_angle * dy) / sigma_safe
                 if abs(rotated_x) >= half_window or abs(rotated_y) >= half_window:
                     continue
+                # 2. 再把这个16x16窗口切成4x4个子区域，每个子区域统计8个方向bin。
                 block_x = int((rotated_x + half_window) // block_size)
                 block_y = int((rotated_y + half_window) // block_size)
                 if (
@@ -612,7 +609,7 @@ class ManualSiftDetector:
                     continue
                 relative_angle = (float(orientation[yy, xx]) - angle) % 360.0
                 orientation_bin = int(relative_angle // orientation_bin_width) % self.descriptor_orientation_bins
-                # 描述子阶段按“半个窗口宽度”的方差做高斯加权，让中心区域更稳定、边缘逐渐衰减。
+                # 3. 梯度幅值先乘一个高斯权重，方差取半个窗口宽度，让中心区域平滑地主导描述子。
                 gaussian_weight = math.exp(
                     -(rotated_x * rotated_x + rotated_y * rotated_y) / (2.0 * gaussian_variance)
                 )
@@ -625,7 +622,7 @@ class ManualSiftDetector:
         norm = float(np.linalg.norm(vector))
         if norm < 1e-8:
             return None
-        # 第一次 L2 归一化抵消整体光照缩放；0.2 截断再归一化用于抑制局部过亮或饱和区域。
+        # 4. 最后把4x4x8拼成128维向量，做L2归一化、0.2截断，再次归一化。
         vector = vector / norm
         vector = np.clip(vector, 0.0, self.descriptor_clip_value)
         renorm = float(np.linalg.norm(vector))
