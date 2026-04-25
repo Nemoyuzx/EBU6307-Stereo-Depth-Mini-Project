@@ -33,7 +33,6 @@ results/**
 !results/.gitkeep
 !results/**/*.gitkeep
 !results/**/*.md
-!results/**/*.csv
 
 logs/
 tmp/

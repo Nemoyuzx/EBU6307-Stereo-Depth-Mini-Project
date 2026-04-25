@@ -1,0 +1,35 @@
+# Remote-only O4 DINOv2 run profile.
+# Keeps the DINOv2 outputs separate from the default O4 baseline folders.
+
+remote:
+  repo_root: .
+  datasets_root: workspace/data
+  middlebury_root: workspace/data/middlebury
+
+results:
+  o4a_transformer_dir: results/O4a_transformer_dinov2
+  o4b_transformer_dir: results/O4b_transformer_dinov2
+  o4c_metrics_file: results/O4c_transformer_dinov2/metrics.csv
+  o4c_fold_metrics_file: results/O4c_transformer_dinov2/fold_summary.csv
+
+o4:
+  downsample_factor: 4
+  patch_size: 2
+  max_disparity: 160
+  min_disparity: 0
+  min_confidence: 0.02
+  token_median_filter_size: 3
+  backend: auto
+  device: auto
+  prefer_cuda: true
+  execution_mode: dinov2_cost_volume
+  dinov2_model_name: facebook/dinov2-base
+  dinov2_repo_path: workspace/external/dinov2
+  dinov2_checkpoint_path: /limx_embop/tos/users/Nemo/self-work/models/dinov2_vitb14_reg4_pretrain.pth
+  disparity_regression: quadratic
+  training_epochs: 0
+  inference_batch_size: 4096
+  fine_detail_weight: 0.35
+  consistency_threshold: 1.0
+  fill_invalid_passes: 2
+  random_seed: 0

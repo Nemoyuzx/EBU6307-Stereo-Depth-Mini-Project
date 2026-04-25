@@ -1185,7 +1185,7 @@ def run(
             valid_mask = (disparity > 0) & np.isfinite(ground_truth) & (ground_truth > 0)
             error_map[valid_mask] = np.abs(disparity[valid_mask] - ground_truth[valid_mask])
 
-        confidence_mask = confidence > 0
+        confidence_mask = np.isfinite(confidence) & (confidence > 0)
         confidence_preview = normalize_for_preview(confidence, confidence_mask)
         write_png(analysis_scene_dir / "confidence.png", confidence_preview)
 
