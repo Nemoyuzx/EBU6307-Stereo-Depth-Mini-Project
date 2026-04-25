@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import sys
 from collections import deque
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +60,7 @@ def write_metrics(metrics_file: Path, rows: list[MetricRow]) -> None:
         merged_rows.append(replacement if replacement is not None else row)
 
     merged_rows.extend(rows_by_scene.values())
+    merged_rows.sort(key=lambda row: str(row["scene"]))
 
     metrics_file.parent.mkdir(parents=True, exist_ok=True)
     with metrics_file.open("w", encoding="utf-8", newline="") as handle:
@@ -515,6 +517,514 @@ def compute_numpy_block_disparity(left_gray: Any, right_gray: Any, config: O3Con
     return disparity.astype(np.float32)
 
 
+def joint_weighted_median_filter_disparity(
+    disparity: Any,
+    guide_gray: Any,
+    radius: int,
+    sigma_color: float,
+    sigma_space: float,
+) -> Any:
+    """用左图引导的加权中值滤波清理噪声，同时避免把不同物体深度直接平均。"""
+
+    source = np.asarray(disparity, dtype=np.float32)
+    guide = np.asarray(guide_gray, dtype=np.float32)
+    if radius <= 0:
+        return source
+
+    padded_disparity = np.pad(source, ((radius, radius), (radius, radius)), mode="edge")
+    padded_guide = np.pad(guide, ((radius, radius), (radius, radius)), mode="edge")
+    values: list[Any] = []
+    weights: list[Any] = []
+    color_scale = max(float(sigma_color), 1e-3)
+    space_scale = max(float(sigma_space), 1e-3)
+
+    for offset_y in range(-radius, radius + 1):
+        for offset_x in range(-radius, radius + 1):
+            shifted_disparity = padded_disparity[
+                radius + offset_y : radius + offset_y + source.shape[0],
+                radius + offset_x : radius + offset_x + source.shape[1],
+            ]
+            shifted_guide = padded_guide[
+                radius + offset_y : radius + offset_y + source.shape[0],
+                radius + offset_x : radius + offset_x + source.shape[1],
+            ]
+            valid = np.isfinite(shifted_disparity) & (shifted_disparity > 0)
+            spatial_distance = float((offset_y * offset_y) + (offset_x * offset_x))
+            spatial_weight = np.exp(-spatial_distance / (2.0 * space_scale * space_scale))
+            color_delta = guide - shifted_guide
+            color_weight = np.exp(-(color_delta * color_delta) / (2.0 * color_scale * color_scale)).astype(np.float32)
+            values.append(shifted_disparity.astype(np.float32, copy=False))
+            weights.append((spatial_weight * color_weight * valid.astype(np.float32)).astype(np.float32))
+
+    value_stack = np.stack(values, axis=0)
+    weight_stack = np.stack(weights, axis=0)
+    order = np.argsort(value_stack, axis=0)
+    sorted_values = np.take_along_axis(value_stack, order, axis=0)
+    sorted_weights = np.take_along_axis(weight_stack, order, axis=0)
+    cumulative = np.cumsum(sorted_weights, axis=0)
+    total = cumulative[-1]
+    median_index = np.argmax(cumulative >= (0.5 * total[None, :, :]), axis=0)
+    filtered = np.take_along_axis(sorted_values, median_index[None, :, :], axis=0)[0]
+    return np.where(total > 0, filtered, source).astype(np.float32)
+
+
+def local_disparity_support_mask(
+    disparity: Any,
+    candidate_mask: Any,
+    radius: int,
+    tolerance: float,
+    min_count: int,
+) -> Any:
+    """保留邻域内有足够同类支持的候选视差，剔除孤立噪点。"""
+
+    source = np.asarray(disparity, dtype=np.float32)
+    candidates = np.asarray(candidate_mask, dtype=bool)
+    if radius <= 0 or min_count <= 1:
+        return candidates
+
+    kernel_size = (radius * 2) + 1
+    padded_source = np.pad(source, ((radius, radius), (radius, radius)), mode="edge")
+    padded_candidates = np.pad(candidates, ((radius, radius), (radius, radius)), mode="constant")
+    source_windows = np.lib.stride_tricks.sliding_window_view(padded_source, (kernel_size, kernel_size))
+    candidate_windows = np.lib.stride_tricks.sliding_window_view(padded_candidates, (kernel_size, kernel_size))
+    close = np.abs(source_windows - source[:, :, None, None]) <= float(tolerance)
+    support_count = np.sum(candidate_windows & close, axis=(-2, -1))
+    return candidates & (support_count >= int(min_count))
+
+
+def compute_pixel_matching_cost(
+    reference_gray: Any,
+    target_gray: Any,
+    reference_gradient: Any,
+    target_gradient: Any,
+    reference_census: Any,
+    target_census: Any,
+    config: O3Config,
+    disparity: int,
+    target_direction: str = "negative",
+) -> Any:
+    """构建 SGM 使用的像素级匹配代价，避免 block 聚合提前抹平边界。"""
+
+    reference = np.asarray(reference_gray, dtype=np.float32)
+    target = np.asarray(target_gray, dtype=np.float32)
+    reference_gradient = np.asarray(reference_gradient, dtype=np.float32)
+    target_gradient = np.asarray(target_gradient, dtype=np.float32)
+    reference_census = np.asarray(reference_census, dtype=np.uint64)
+    target_census = np.asarray(target_census, dtype=np.uint64)
+
+    height, width = reference.shape
+    shifted_gray = np.zeros_like(target)
+    shifted_gradient = np.zeros_like(target_gradient)
+    shifted_census = np.zeros_like(target_census)
+    if disparity == 0:
+        shifted_gray[:] = target
+        shifted_gradient[:] = target_gradient
+        shifted_census[:] = target_census
+    elif target_direction == "positive":
+        shifted_gray[:, : width - disparity] = target[:, disparity:]
+        shifted_gradient[:, : width - disparity] = target_gradient[:, disparity:]
+        shifted_census[:, : width - disparity] = target_census[:, disparity:]
+    else:
+        shifted_gray[:, disparity:] = target[:, : width - disparity]
+        shifted_gradient[:, disparity:] = target_gradient[:, : width - disparity]
+        shifted_census[:, disparity:] = target_census[:, : width - disparity]
+
+    intensity_cost = np.minimum(np.abs(reference - shifted_gray), 32.0)
+    gradient_cost = np.minimum(np.abs(reference_gradient - shifted_gradient), 16.0)
+    census_cost = bit_count_array(reference_census ^ shifted_census)
+    cost = (0.5 * intensity_cost) + (config.gradient_weight * gradient_cost) + (config.census_weight * census_cost)
+    if disparity > 0:
+        if target_direction == "positive":
+            cost[:, width - disparity :] = np.inf
+        else:
+            cost[:, :disparity] = np.inf
+    return cost.astype(np.float32)
+
+
+def read_scene_disparity_hints(scene_dir: Path) -> dict[str, float]:
+    """从 Middlebury calib.txt 读取场景视差范围提示。"""
+
+    hints: dict[str, float] = {}
+    calib_path = scene_dir / "calib.txt"
+    if not calib_path.exists():
+        return hints
+
+    for line in calib_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip().lower()
+        value = value.strip()
+        if key not in {"width", "height", "ndisp", "vmin", "vmax"}:
+            continue
+        try:
+            hints[key] = float(value)
+        except ValueError:
+            continue
+    return hints
+
+
+def estimate_scene_disparity_bounds(scene_dir: Path, image_shape: tuple[int, int], config: O3Config) -> tuple[int, int]:
+    """根据标定文件为高视差场景扩展搜索范围，低视差场景保持默认范围。"""
+
+    base_min = 0
+    base_max = min(max(1, int(config.num_disparities)) - 1, image_shape[1] - 1)
+    hints = read_scene_disparity_hints(scene_dir)
+    if not hints:
+        return base_min, base_max
+
+    image_height, image_width = image_shape
+    calib_width = hints.get("width", 0.0)
+    calib_height = hints.get("height", 0.0)
+    scale = 1.0
+    if calib_width > 0 and calib_height > 0:
+        width_scale = image_width / calib_width
+        height_scale = image_height / calib_height
+        if abs(width_scale - height_scale) <= 0.05:
+            scale = width_scale
+
+    calibrated_max = hints.get("vmax", hints.get("ndisp", 0.0)) * scale
+    if calibrated_max <= base_max:
+        return base_min, base_max
+
+    calibrated_min = hints.get("vmin", 0.0) * scale
+    calibrated_span = max(1.0, calibrated_max - calibrated_min)
+    margin = max(8.0, calibrated_span * 0.05)
+    search_min = max(0, int(np.floor(calibrated_min - margin)))
+    search_max = min(image_width - 1, int(np.ceil(calibrated_max + margin)))
+    return search_min, max(search_min, search_max)
+
+
+def build_matching_cost_volume(
+    left_gray: Any,
+    right_gray: Any,
+    config: O3Config,
+    target_direction: str = "negative",
+    min_disparity: int = 0,
+    max_disparity: int | None = None,
+) -> Any:
+    """构建 O3 像素级匹配代价体，后续由自实现 SGM 聚合。"""
+
+    left = np.asarray(left_gray, dtype=np.float32)
+    right = np.asarray(right_gray, dtype=np.float32)
+    left_gradient = compute_horizontal_gradient(left)
+    right_gradient = compute_horizontal_gradient(right)
+    left_census = compute_census_transform(left, config.census_window_size)
+    right_census = compute_census_transform(right, config.census_window_size)
+    lower_bound = max(0, int(min_disparity))
+    upper_bound = min(
+        int(max_disparity) if max_disparity is not None else max(1, config.num_disparities) - 1,
+        left.shape[1] - 1,
+    )
+    upper_bound = max(lower_bound, upper_bound)
+    disparities = range(lower_bound, upper_bound + 1)
+    volume = np.empty((left.shape[0], left.shape[1], len(disparities)), dtype=np.float32)
+    for volume_index, disparity in enumerate(disparities):
+        volume[:, :, volume_index] = compute_pixel_matching_cost(
+            left,
+            right,
+            left_gradient,
+            right_gradient,
+            left_census,
+            right_census,
+            config,
+            disparity,
+            target_direction=target_direction,
+        )
+    return volume
+
+
+def normalize_cost_volume(cost_volume: Any) -> Any:
+    """把代价体转成适合 SGM 聚合的有限相对代价。"""
+
+    source = np.asarray(cost_volume, dtype=np.float32)
+    finite = np.isfinite(source)
+    if not bool(np.any(finite)):
+        return np.zeros_like(source, dtype=np.float32)
+
+    finite_values = source[finite]
+    high_cost = float(np.percentile(finite_values, 99.0))
+    replacement = high_cost + max(1.0, abs(high_cost) * 0.25)
+    normalized = np.where(finite, source, replacement).astype(np.float32)
+    normalized -= normalized.min(axis=2, keepdims=True)
+    return normalized.astype(np.float32)
+
+
+def estimate_sgm_penalties(cost_volume: Any) -> tuple[float, float]:
+    """根据当前场景代价分布估计 SGM 平滑惩罚。"""
+
+    finite = np.asarray(cost_volume, dtype=np.float32)
+    positive = finite[np.isfinite(finite) & (finite > 0)]
+    if positive.size == 0:
+        return 1.0, 8.0
+    scale = float(np.percentile(positive, 60.0))
+    p1 = max(1.0, scale * 0.08)
+    p2 = max(p1 * 5.0, scale * 0.55)
+    return p1, p2
+
+
+def aggregate_sgm_axis(cost_volume: Any, guide_gray: Any, axis: int, reverse: bool, p1: float, p2: float) -> Any:
+    """沿单一方向执行带图像边缘自适应惩罚的 SGM 动态规划聚合。"""
+
+    source = np.asarray(cost_volume, dtype=np.float32)
+    guide = np.asarray(guide_gray, dtype=np.float32)
+    height, width, _ = source.shape
+    aggregated = np.zeros_like(source, dtype=np.float32)
+    infinity = np.float32(1e9)
+    edge_scale = np.float32(8.0)
+    minimum_jump = np.float32(max(float(p1) * 2.0, 1.0))
+
+    if axis == 1:
+        first_column = width - 1 if reverse else 0
+        previous = source[:, first_column, :].copy()
+        aggregated[:, first_column, :] = previous
+        columns = range(first_column - 1, -1, -1) if reverse else range(first_column + 1, width)
+        for column_index in columns:
+            previous_column = column_index + 1 if reverse else column_index - 1
+            edge_delta = np.abs(guide[:, column_index] - guide[:, previous_column])[:, None]
+            adaptive_p2 = np.maximum(minimum_jump, float(p2) / (1.0 + (edge_delta / edge_scale)))
+            previous_min = previous.min(axis=1, keepdims=True)
+            from_lower = np.empty_like(previous)
+            from_upper = np.empty_like(previous)
+            from_lower[:, 0] = infinity
+            from_lower[:, 1:] = previous[:, :-1] + p1
+            from_upper[:, :-1] = previous[:, 1:] + p1
+            from_upper[:, -1] = infinity
+            jump_cost = np.broadcast_to(previous_min + adaptive_p2, previous.shape)
+            transition = np.minimum.reduce((previous, from_lower, from_upper, jump_cost))
+            current = source[:, column_index, :] + transition - previous_min
+            aggregated[:, column_index, :] = current
+            previous = current
+        return aggregated
+
+    first_row = height - 1 if reverse else 0
+    previous = source[first_row, :, :].copy()
+    aggregated[first_row, :, :] = previous
+    rows = range(first_row - 1, -1, -1) if reverse else range(first_row + 1, height)
+    for row_index in rows:
+        previous_row = row_index + 1 if reverse else row_index - 1
+        edge_delta = np.abs(guide[row_index, :] - guide[previous_row, :])[:, None]
+        adaptive_p2 = np.maximum(minimum_jump, float(p2) / (1.0 + (edge_delta / edge_scale)))
+        previous_min = previous.min(axis=1, keepdims=True)
+        from_lower = np.empty_like(previous)
+        from_upper = np.empty_like(previous)
+        from_lower[:, 0] = infinity
+        from_lower[:, 1:] = previous[:, :-1] + p1
+        from_upper[:, :-1] = previous[:, 1:] + p1
+        from_upper[:, -1] = infinity
+        jump_cost = np.broadcast_to(previous_min + adaptive_p2, previous.shape)
+        transition = np.minimum.reduce((previous, from_lower, from_upper, jump_cost))
+        current = source[row_index, :, :] + transition - previous_min
+        aggregated[row_index, :, :] = current
+        previous = current
+    return aggregated
+
+
+def solve_sgm_direction(
+    reference_gray: Any,
+    target_gray: Any,
+    config: O3Config,
+    target_direction: str,
+    min_disparity: int = 0,
+    max_disparity: int | None = None,
+) -> tuple[Any, Any]:
+    """对一个参考视角执行自实现四方向 SGM，返回视差与聚合置信边际。"""
+
+    raw_cost = build_matching_cost_volume(
+        reference_gray,
+        target_gray,
+        config,
+        target_direction=target_direction,
+        min_disparity=min_disparity,
+        max_disparity=max_disparity,
+    )
+    cost = normalize_cost_volume(raw_cost)
+    p1, p2 = estimate_sgm_penalties(cost)
+    reference = np.asarray(reference_gray, dtype=np.float32)
+    aggregated = cost.copy()
+    aggregated += aggregate_sgm_axis(cost, reference, axis=1, reverse=False, p1=p1, p2=p2)
+    aggregated += aggregate_sgm_axis(cost, reference, axis=1, reverse=True, p1=p1, p2=p2)
+    aggregated += aggregate_sgm_axis(cost, reference, axis=0, reverse=False, p1=p1, p2=p2)
+    aggregated += aggregate_sgm_axis(cost, reference, axis=0, reverse=True, p1=p1, p2=p2)
+
+    best = (np.argmin(aggregated, axis=2) + max(0, int(min_disparity))).astype(np.float32)
+    if aggregated.shape[2] > 1:
+        sorted_cost = np.partition(aggregated, kth=1, axis=2)
+        margin = sorted_cost[:, :, 1] - sorted_cost[:, :, 0]
+        positive_margin = margin[np.isfinite(margin) & (margin > 0)]
+        confidence_floor = float(np.percentile(positive_margin, 8.0)) if positive_margin.size else 0.0
+        best = np.where(margin >= confidence_floor, best, 0.0).astype(np.float32)
+    else:
+        margin = np.zeros(best.shape, dtype=np.float32)
+
+    return best.astype(np.float32), margin.astype(np.float32)
+
+
+def fill_disparity_with_local_weighted_median(
+    disparity: Any,
+    guide_gray: Any,
+    radius: int,
+    sigma_color: float,
+    sigma_space: float,
+    min_count: int,
+) -> Any:
+    """只用局部有效邻居填补小洞，避免行列全局传播造成大片糊连。"""
+
+    source = np.asarray(disparity, dtype=np.float32)
+    guide = np.asarray(guide_gray, dtype=np.float32)
+    if radius <= 0:
+        return source
+
+    padded_disparity = np.pad(source, ((radius, radius), (radius, radius)), mode="edge")
+    padded_guide = np.pad(guide, ((radius, radius), (radius, radius)), mode="edge")
+    values: list[Any] = []
+    weights: list[Any] = []
+    counts = np.zeros_like(source, dtype=np.int16)
+    color_scale = max(float(sigma_color), 1e-3)
+    space_scale = max(float(sigma_space), 1e-3)
+
+    for offset_y in range(-radius, radius + 1):
+        for offset_x in range(-radius, radius + 1):
+            shifted_disparity = padded_disparity[
+                radius + offset_y : radius + offset_y + source.shape[0],
+                radius + offset_x : radius + offset_x + source.shape[1],
+            ]
+            shifted_guide = padded_guide[
+                radius + offset_y : radius + offset_y + source.shape[0],
+                radius + offset_x : radius + offset_x + source.shape[1],
+            ]
+            valid = np.isfinite(shifted_disparity) & (shifted_disparity > 0)
+            counts += valid.astype(np.int16)
+            spatial_distance = float((offset_y * offset_y) + (offset_x * offset_x))
+            spatial_weight = np.exp(-spatial_distance / (2.0 * space_scale * space_scale))
+            color_delta = guide - shifted_guide
+            color_weight = np.exp(-(color_delta * color_delta) / (2.0 * color_scale * color_scale)).astype(np.float32)
+            values.append(shifted_disparity.astype(np.float32, copy=False))
+            weights.append((spatial_weight * color_weight * valid.astype(np.float32)).astype(np.float32))
+
+    value_stack = np.stack(values, axis=0)
+    weight_stack = np.stack(weights, axis=0)
+    order = np.argsort(value_stack, axis=0)
+    sorted_values = np.take_along_axis(value_stack, order, axis=0)
+    sorted_weights = np.take_along_axis(weight_stack, order, axis=0)
+    cumulative = np.cumsum(sorted_weights, axis=0)
+    total = cumulative[-1]
+    median_index = np.argmax(cumulative >= (0.5 * total[None, :, :]), axis=0)
+    filled = np.take_along_axis(sorted_values, median_index[None, :, :], axis=0)[0]
+    fill_mask = (source <= 0) & (counts >= int(min_count)) & (total > 0)
+    return np.where(fill_mask, filled, source).astype(np.float32)
+
+
+def compute_sgm_disparity(
+    left_gray: Any,
+    right_gray: Any,
+    config: O3Config,
+    min_disparity: int = 0,
+    max_disparity: int | None = None,
+    feature_stereo_matches: int | None = None,
+) -> Any:
+    """使用自实现左右一致性 SGM 生成稳定且边缘清晰的 O3 视差。"""
+
+    left = np.asarray(left_gray, dtype=np.float32)
+    # Very sparse manual-SIFT stereo support is a good warning sign for repeated or weak texture.
+    sparse_feature_support = feature_stereo_matches is not None and feature_stereo_matches < 64
+    support_tolerance = 1.0 if sparse_feature_support else 2.5
+    initial_support_min_count = 16 if sparse_feature_support else 7
+    final_support_min_count = 16 if sparse_feature_support else 8
+    left_disparity, left_margin = solve_sgm_direction(
+        left_gray,
+        right_gray,
+        config,
+        target_direction="negative",
+        min_disparity=min_disparity,
+        max_disparity=max_disparity,
+    )
+    right_disparity, _ = solve_sgm_direction(
+        right_gray,
+        left_gray,
+        config,
+        target_direction="positive",
+        min_disparity=min_disparity,
+        max_disparity=max_disparity,
+    )
+
+    consistency_limit = max(float(config.consistency_threshold), float(config.disp12_max_diff), 1.5)
+    consistent_mask = left_right_consistency_mask(left_disparity, right_disparity, consistency_limit)
+
+    if left_margin.size:
+        margin_values = left_margin[np.isfinite(left_margin) & (left_margin > 0)]
+        margin_floor = float(np.percentile(margin_values, 5.0)) if margin_values.size else 0.0
+        consistent_mask &= left_margin >= margin_floor
+
+    anchor = np.where(consistent_mask, left_disparity, 0.0).astype(np.float32)
+
+    texture_x = np.abs(compute_horizontal_gradient(left))
+    texture_y = np.abs(compute_horizontal_gradient(left.T).T)
+    texture = texture_x + texture_y
+    texture_values = texture[np.isfinite(texture)]
+    edge_floor = float(np.percentile(texture_values, 90.0)) if texture_values.size else 0.0
+    edge_mask = texture >= edge_floor
+
+    anchor = filter_speckles(anchor, max(32, config.speckle_window_size // 3), max(2, config.speckle_range // 4))
+    support_mask = local_disparity_support_mask(
+        anchor,
+        anchor > 0,
+        radius=2,
+        tolerance=support_tolerance,
+        min_count=initial_support_min_count,
+    )
+    anchor_filled = np.where(support_mask, anchor, 0.0).astype(np.float32)
+    fill_plan = (
+        (2, 10.0, 1.6, 5, 1),
+        (3, 12.0, 2.0, 10, 1),
+    )
+    for fill_radius, sigma_color, sigma_space, min_count, repeats in fill_plan:
+        for _ in range(repeats):
+            anchor_filled = fill_disparity_with_local_weighted_median(
+                anchor_filled,
+                left_gray,
+                radius=fill_radius,
+                sigma_color=sigma_color,
+                sigma_space=sigma_space,
+                min_count=min_count,
+            )
+
+    best = np.where(anchor_filled > 0, anchor_filled, 0.0).astype(np.float32)
+
+    best = np.where(best > 0, best, 0.0).astype(np.float32)
+    invalid_margin = max(config.block_size // 2, config.census_window_size // 2)
+    if invalid_margin > 0:
+        best[:invalid_margin, :] = 0.0
+        best[-invalid_margin:, :] = 0.0
+        best[:, :invalid_margin] = 0.0
+        best[:, -invalid_margin:] = 0.0
+
+    support_mask = local_disparity_support_mask(
+        best,
+        best > 0,
+        radius=2,
+        tolerance=support_tolerance,
+        min_count=final_support_min_count,
+    )
+    best = np.where(support_mask, best, 0.0).astype(np.float32)
+    best = filter_speckles(best, max(48, config.speckle_window_size // 2), max(2, config.speckle_range // 3))
+
+    if config.median_filter_size > 1:
+        positive_mask = best > 0
+        filtered = median_filter_2d(best, config.median_filter_size)
+        best = np.where(positive_mask & ~edge_mask, filtered, best).astype(np.float32)
+
+    filtered = joint_weighted_median_filter_disparity(
+        best,
+        left_gray,
+        radius=1,
+        sigma_color=8.0,
+        sigma_space=1.2,
+    )
+    best = np.where(best > 0, filtered, 0.0).astype(np.float32)
+    return np.where(best > 0, best, 0.0).astype(np.float32)
+
+
 def filter_stereo_feature_matches(
     left_keypoints: Any,
     right_keypoints: Any,
@@ -686,6 +1196,44 @@ def compute_sift_driven_disparity(left_gray: Any, right_gray: Any, config: O3Con
     return disparity.astype(np.float32), stats
 
 
+def collect_sift_stereo_stats(left_gray: Any, right_gray: Any, config: O3Config) -> dict[str, int]:
+    """运行手写 SIFT 生成器并统计满足立体几何约束的匹配数量。"""
+
+    detector = create_sift_detector(config.max_features, config.contrast_threshold)
+    left_keypoints, left_descriptors = detector.detectAndCompute(left_gray, None)
+    right_keypoints, right_descriptors = detector.detectAndCompute(right_gray, None)
+
+    stats = {
+        "left_keypoints": len(left_keypoints),
+        "right_keypoints": len(right_keypoints),
+        "raw_matches": 0,
+        "ratio_matches": 0,
+        "mutual_matches": 0,
+        "stereo_matches": 0,
+    }
+    if left_descriptors is None or right_descriptors is None or len(left_descriptors) == 0 or len(right_descriptors) == 0:
+        return stats
+
+    raw_matches, ratio_filtered, mutual_matches = _mutual_ratio_matches(
+        left_descriptors,
+        right_descriptors,
+        float(config.ratio_test),
+    )
+    stats["raw_matches"] = int(raw_matches)
+    stats["ratio_matches"] = len(ratio_filtered)
+    stats["mutual_matches"] = len(mutual_matches)
+
+    geometry_aware_matches, _ = _select_geometry_aware_matches(
+        left_keypoints,
+        right_keypoints,
+        ratio_filtered,
+        mutual_matches,
+    )
+    stereo_matches = filter_stereo_feature_matches(left_keypoints, right_keypoints, geometry_aware_matches, config)
+    stats["stereo_matches"] = len(stereo_matches)
+    return stats
+
+
 def average_pool_gray(image: Any, factor: int) -> Any:
     """对灰度图做平均池化降采样。"""
 
@@ -837,10 +1385,19 @@ def run(
     for scene_dir in scenes:
         left_gray = load_gray(scene_dir / "im0.png")
         right_gray = load_gray(scene_dir / "im1.png")
-        disparity, stats = compute_sift_driven_disparity(left_gray, right_gray, config)
+        min_disparity, max_disparity = estimate_scene_disparity_bounds(scene_dir, left_gray.shape, config)
+        scene_config = replace(config, num_disparities=max(config.num_disparities, max_disparity + 1))
+        stats = collect_sift_stereo_stats(left_gray, right_gray, scene_config)
+        disparity = compute_sgm_disparity(
+            left_gray,
+            right_gray,
+            scene_config,
+            min_disparity=min_disparity,
+            max_disparity=max_disparity,
+            feature_stereo_matches=stats["stereo_matches"],
+        )
         generator_name = (
-            "O3 SIFT-driven stereo disparity from feature matches with row/column interpolation "
-            "and lightweight disparity cleanup"
+            "O3 manual-SIFT-audited census-gradient SGM disparity with left-right consistency"
         )
         disparity_mask = disparity > 0
 
@@ -863,16 +1420,19 @@ def run(
                 f"ratio_matches: {stats['ratio_matches']}",
                 f"mutual_matches: {stats['mutual_matches']}",
                 f"stereo_matches: {stats['stereo_matches']}",
-                f"max_features: {config.max_features}",
-                f"contrast_threshold: {config.contrast_threshold}",
-                f"ratio_test: {config.ratio_test}",
-                f"num_disparities: {config.num_disparities}",
-                f"max_vertical_offset: {config.max_vertical_offset}",
-                f"block_size: {config.block_size}",
-                f"speckle_window_size: {config.speckle_window_size}",
-                f"speckle_range: {config.speckle_range}",
-                f"fill_invalid_passes: {config.fill_invalid_passes}",
-                f"median_filter_size: {config.median_filter_size}",
+                f"max_features: {scene_config.max_features}",
+                f"contrast_threshold: {scene_config.contrast_threshold}",
+                f"ratio_test: {scene_config.ratio_test}",
+                f"base_num_disparities: {config.num_disparities}",
+                f"min_disparity: {min_disparity}",
+                f"max_disparity: {max_disparity}",
+                f"search_disparities: {max_disparity - min_disparity + 1}",
+                f"max_vertical_offset: {scene_config.max_vertical_offset}",
+                f"block_size: {scene_config.block_size}",
+                f"speckle_window_size: {scene_config.speckle_window_size}",
+                f"speckle_range: {scene_config.speckle_range}",
+                f"fill_invalid_passes: {scene_config.fill_invalid_passes}",
+                f"median_filter_size: {scene_config.median_filter_size}",
                 f"valid_disparity_pixels: {int(disparity_mask.sum())}",
             ],
         )
@@ -928,7 +1488,8 @@ def run(
         print(
             f"Wrote O3 scene: {scene_dir.name} "
             f"(left={stats['left_keypoints']}, right={stats['right_keypoints']}, stereo_matches={stats['stereo_matches']}, "
-            f"valid_disparity_pixels={metrics['valid_disparity_pixels']}, mae={mae_text}, rmse={rmse_text}, bad_1px={bad_text})"
+            f"disparity_range={min_disparity}-{max_disparity}, valid_disparity_pixels={metrics['valid_disparity_pixels']}, "
+            f"mae={mae_text}, rmse={rmse_text}, bad_1px={bad_text})"
         )
 
     write_metrics(config.metrics_file, metric_rows)

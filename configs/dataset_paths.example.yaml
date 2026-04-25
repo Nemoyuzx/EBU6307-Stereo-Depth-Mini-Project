@@ -46,9 +46,9 @@ o3:
   max_draw_matches: 80
   num_disparities: 96
   max_vertical_offset: 2.0
-  block_size: 9
-  uniqueness_ratio: 8
-  speckle_window_size: 100
+  block_size: 5
+  uniqueness_ratio: 0
+  speckle_window_size: 0
   speckle_range: 8
   disp12_max_diff: 1
   median_filter_size: 3
@@ -56,7 +56,7 @@ o3:
   census_weight: 3.0
   gradient_weight: 1.0
   consistency_threshold: 1.0
-  fill_invalid_passes: 2
+  fill_invalid_passes: 0
 
 o4:
   num_folds: 5

@@ -172,7 +172,7 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
     census_weight = max(0.0, float(o3_block.get("census_weight", 3.0)))
     gradient_weight = max(0.0, float(o3_block.get("gradient_weight", 1.0)))
     consistency_threshold = max(0.0, float(o3_block.get("consistency_threshold", 1.0)))
-    fill_invalid_passes = max(0, int(o3_block.get("fill_invalid_passes", 2)))
+    o3_fill_invalid_passes = max(0, int(o3_block.get("fill_invalid_passes", 2)))
 
     o4_disparity_value = result_block.get("o4a_transformer_dir") or "results/O4a_transformer"
     o4_analysis_value = result_block.get("o4b_transformer_dir") or "results/O4b_transformer"
@@ -224,7 +224,7 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
         context_window_size += 1
     fine_detail_weight = max(0.0, float(o4_block.get("fine_detail_weight", 0.35)))
     consistency_threshold = max(0.0, float(o4_block.get("consistency_threshold", 1.0)))
-    fill_invalid_passes = max(0, int(o4_block.get("fill_invalid_passes", 2)))
+    o4_fill_invalid_passes = max(0, int(o4_block.get("fill_invalid_passes", 2)))
     random_seed = int(o4_block.get("random_seed", 0))
 
     middlebury_root = resolve_path(repo_root, middlebury_value)
@@ -267,7 +267,7 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
             census_weight=census_weight,
             gradient_weight=gradient_weight,
             consistency_threshold=consistency_threshold,
-            fill_invalid_passes=fill_invalid_passes,
+            fill_invalid_passes=o3_fill_invalid_passes,
         ),
         o4=O4Config(
             disparity_dir=resolve_path(repo_root, o4_disparity_value),
@@ -310,7 +310,7 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
             context_window_size=context_window_size,
             fine_detail_weight=fine_detail_weight,
             consistency_threshold=consistency_threshold,
-            fill_invalid_passes=fill_invalid_passes,
+            fill_invalid_passes=o4_fill_invalid_passes,
             random_seed=random_seed,
         ),
     )
