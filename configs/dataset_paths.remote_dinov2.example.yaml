@@ -13,9 +13,9 @@ results:
   o4c_fold_metrics_file: results/O4c_transformer_dinov2/fold_summary.csv
 
 o4:
-  downsample_factor: 4
+  downsample_factor: 2
   patch_size: 2
-  max_disparity: 160
+  max_disparity: 288
   min_disparity: 0
   min_confidence: 0.02
   token_median_filter_size: 3

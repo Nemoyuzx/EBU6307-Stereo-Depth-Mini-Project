@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import csv
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -23,8 +23,12 @@ from o3 import (
     average_pool_gray,
     box_filter_sum,
     compute_horizontal_gradient,
-    compute_numpy_block_disparity,
+    compute_sgm_disparity,
+    collect_sift_stereo_stats,
+    estimate_scene_disparity_bounds,
+    fill_disparity_with_local_weighted_median,
     fill_invalid_disparity,
+    joint_weighted_median_filter_disparity,
     left_right_consistency_mask,
     median_filter_2d,
 )
@@ -34,7 +38,6 @@ from o4_torch import (
     build_token_descriptors_torch,
     build_token_ground_truth_torch,
     collect_o4_training_samples_torch,
-    compute_block_disparity_torch,
     encode_o4_descriptors_torch,
     extract_baseline_patch_tokens_torch,
     fill_invalid_disparity_torch,
@@ -501,6 +504,122 @@ def estimate_o4_working_set_mb(token_height: int, token_width: int, token_dim: i
     return float(total_bytes / (1024.0 * 1024.0))
 
 
+def build_o4_detail_config(config: O4Config) -> O3Config:
+    """为 O4 细节融合构建与当前 O3 正式路径一致的 SGM 配置。"""
+
+    return O3Config(
+        disparity_dir=config.disparity_dir,
+        analysis_dir=config.analysis_dir,
+        metrics_file=config.metrics_file,
+        max_features=800,
+        contrast_threshold=0.04,
+        ratio_test=0.8,
+        max_draw_matches=80,
+        num_disparities=96,
+        max_vertical_offset=2.0,
+        block_size=5,
+        uniqueness_ratio=0,
+        speckle_window_size=0,
+        speckle_range=8,
+        disp12_max_diff=1,
+        median_filter_size=3,
+        census_window_size=5,
+        census_weight=3.0,
+        gradient_weight=1.0,
+        consistency_threshold=1.0,
+        fill_invalid_passes=0,
+    )
+
+
+def compute_o4_detail_disparity(scene_dir: Path, left_gray: Any, right_gray: Any, detail_config: O3Config) -> tuple[Any, int, int, dict[str, int]]:
+    """计算 O4 最终可视化使用的高分辨率 SGM 细节视差。"""
+
+    min_disparity, max_disparity = estimate_scene_disparity_bounds(scene_dir, left_gray.shape, detail_config)
+    scene_detail_config = replace(detail_config, num_disparities=max(detail_config.num_disparities, max_disparity + 1))
+    detail_stats = collect_sift_stereo_stats(left_gray, right_gray, scene_detail_config)
+    detail_disparity = compute_sgm_disparity(
+        left_gray,
+        right_gray,
+        scene_detail_config,
+        min_disparity=min_disparity,
+        max_disparity=max_disparity,
+        feature_stereo_matches=detail_stats["stereo_matches"],
+    )
+    return detail_disparity.astype(np.float32), min_disparity, max_disparity, detail_stats
+
+
+def normalize_confidence_weights(confidence: Any) -> Any:
+    """把 token 置信度压到 0..1，避免少数极值支配融合。"""
+
+    source = np.asarray(confidence, dtype=np.float32)
+    valid = np.isfinite(source) & (source > 0)
+    weights = np.zeros_like(source, dtype=np.float32)
+    if not bool(np.any(valid)):
+        return weights
+    scale = float(np.percentile(source[valid], 90.0))
+    if scale <= 0:
+        return weights
+    weights[valid] = np.clip(source[valid] / scale, 0.0, 1.0)
+    return weights
+
+
+def fuse_o4_disparity_with_detail(transformer_disparity: Any, detail_disparity: Any, confidence: Any, config: O4Config, token_span: int) -> Any:
+    """以高分辨率 SGM 为结构主体，只在可信且一致的位置引入 O4 token 先验。"""
+
+    token = np.asarray(transformer_disparity, dtype=np.float32)
+    detail = np.asarray(detail_disparity, dtype=np.float32)
+    token_valid = np.isfinite(token) & (token > 0)
+    detail_valid = np.isfinite(detail) & (detail > 0)
+    if not bool(np.any(detail_valid)):
+        return np.where(token_valid, token, 0.0).astype(np.float32)
+
+    fused = np.where(detail_valid, detail, 0.0).astype(np.float32)
+    confidence_weight = normalize_confidence_weights(confidence)
+    tolerance = max(4.0, float(token_span) * 0.35)
+    coherent = token_valid & detail_valid & (np.abs(token - detail) <= tolerance)
+    token_weight = min(0.20, max(0.0, 1.0 - float(config.fine_detail_weight)))
+    weights = (token_weight * confidence_weight).astype(np.float32)
+    fused = np.where(coherent, ((1.0 - weights) * detail) + (weights * token), fused).astype(np.float32)
+    return np.where(np.isfinite(fused) & (fused > 0), fused, 0.0).astype(np.float32)
+
+
+def build_o4_display_confidence(confidence: Any, disparity: Any) -> Any:
+    """生成与最终融合视差一致的 confidence 预览，避免低分辨率 token 方块主导显示。"""
+
+    disparity_source = np.asarray(disparity, dtype=np.float32)
+    valid = np.isfinite(disparity_source) & (disparity_source > 0)
+    depth_weight = normalize_confidence_weights(disparity_source)
+    display_confidence = np.where(valid, 0.25 + (0.75 * depth_weight), 0.0)
+    return display_confidence.astype(np.float32)
+
+
+def build_o4_preview_disparity(disparity: Any, guide_gray: Any) -> Any:
+    """为 PNG 预览生成更连续的视差图，不改变写入 PFM 的可靠像素集合。"""
+
+    preview = np.asarray(disparity, dtype=np.float32).copy()
+    if not bool(np.any(np.isfinite(preview) & (preview > 0))):
+        return preview
+
+    for _ in range(2):
+        preview = fill_disparity_with_local_weighted_median(
+            preview,
+            guide_gray,
+            radius=3,
+            sigma_color=12.0,
+            sigma_space=2.0,
+            min_count=6,
+        )
+    preview = fill_invalid_disparity(preview, 1)
+    filtered = joint_weighted_median_filter_disparity(
+        preview,
+        guide_gray,
+        radius=1,
+        sigma_color=8.0,
+        sigma_space=1.2,
+    )
+    return np.where(filtered > 0, filtered, preview).astype(np.float32)
+
+
 def summarize_o4_folds(rows: list[dict[str, str | int | float]], num_folds: int) -> list[dict[str, str | int | float]]:
     """把场景级指标汇总成 fold 级平均指标。"""
     fold_rows: list[dict[str, str | int | float]] = []
@@ -680,8 +799,14 @@ def run(
     config.analysis_dir.mkdir(parents=True, exist_ok=True)
     use_cuda_o4 = backend_status.use_torch and backend_status.device == "cuda"
 
+    payload_scene_dirs = (
+        discovered_scenes
+        if execution_status.selected_mode == "baseline" and scene_name is None and max_scenes is None
+        else scenes
+    )
+
     scene_payloads: list[dict[str, Any]] = []
-    for scene_dir in discovered_scenes:
+    for scene_dir in payload_scene_dirs:
         left_gray = load_gray(scene_dir / "im0.png")
         right_gray = load_gray(scene_dir / "im1.png")
         if execution_status.selected_mode == "dinov2_cost_volume":
@@ -806,28 +931,7 @@ def run(
             )
             fold_training_stats[fold_index] = (int(training_descriptors.shape[0]), fold_models[fold_index])
 
-    detail_config = O3Config(
-        disparity_dir=config.disparity_dir,
-        analysis_dir=config.analysis_dir,
-        metrics_file=config.metrics_file,
-        max_features=800,
-        contrast_threshold=0.04,
-        ratio_test=0.8,
-        max_draw_matches=80,
-        num_disparities=max(16, ((config.max_disparity + 15) // 16) * 16),
-        max_vertical_offset=2.0,
-        block_size=7,
-        uniqueness_ratio=6,
-        speckle_window_size=0,
-        speckle_range=0,
-        disp12_max_diff=1,
-        median_filter_size=3,
-        census_window_size=5,
-        census_weight=3.0,
-        gradient_weight=1.0,
-        consistency_threshold=1.0,
-        fill_invalid_passes=1,
-    )
+    detail_config = build_o4_detail_config(config)
 
     metric_rows: list[MetricRow] = []
     for scene_dir in scenes:
@@ -883,6 +987,12 @@ def run(
             training_sample_count = 0
             training_state = model_state
         fallback_used = execution_status.selected_mode == "baseline" and not training_state.trained
+        detail_disparity, detail_min_disparity, detail_max_disparity, detail_stats = compute_o4_detail_disparity(
+            scene_dir,
+            payload["left_gray"],
+            payload["right_gray"],
+            detail_config,
+        )
 
         if fallback_used:
             fallback_downsample_factor = max(config.downsample_factor, 2)
@@ -1023,13 +1133,13 @@ def run(
                     )
                     refined_token_disparity = filtered.masked_fill(~token_mask, 0.0).float()
                 disparity_tokens = refined_token_disparity.float() * float(token_span)
-                detail_disparity = compute_block_disparity_torch(
-                    payload["left_gray"],
-                    payload["right_gray"],
-                    detail_config,
+                import torch
+
+                detail_tokens = average_pool_2d_torch(
+                    torch.as_tensor(detail_disparity, dtype=torch.float32, device=model_state.device),
+                    token_span,
                     device=model_state.device,
                 )
-                detail_tokens = average_pool_2d_torch(detail_disparity, token_span, device=model_state.device)
                 detail_tokens = detail_tokens[: disparity_tokens.shape[0], : disparity_tokens.shape[1]].float()
                 detail_tokens = detail_tokens.masked_fill(disparity_tokens <= 0, 0.0)
                 disparity_tokens = ((1.0 - config.fine_detail_weight) * disparity_tokens) + (config.fine_detail_weight * detail_tokens)
@@ -1100,7 +1210,6 @@ def run(
                     filtered = median_filter_2d(refined_token_disparity, config.token_median_filter_size)
                     refined_token_disparity = np.where(token_mask, filtered, 0.0).astype(np.float32)
                 disparity_tokens = refined_token_disparity.astype(np.float32) * float(token_span)
-                detail_disparity = compute_numpy_block_disparity(payload["left_gray"], payload["right_gray"], detail_config)
                 detail_tokens = average_pool_2d(detail_disparity.astype(np.float32), token_span)
                 detail_tokens = detail_tokens[: disparity_tokens.shape[0], : disparity_tokens.shape[1]].astype(np.float32)
                 detail_tokens = np.where(disparity_tokens > 0, detail_tokens, 0.0)
@@ -1117,6 +1226,10 @@ def run(
                     payload["left_gray"].shape[0],
                     payload["left_gray"].shape[1],
                 ).astype(np.float32)
+
+        disparity = fuse_o4_disparity_with_detail(disparity, detail_disparity, confidence, config, token_span)
+        display_disparity = build_o4_preview_disparity(disparity, payload["left_gray"])
+        confidence = build_o4_display_confidence(confidence, display_disparity)
 
         disparity_scene_dir = config.disparity_dir / scene_dir.name
         analysis_scene_dir = config.analysis_dir / scene_dir.name
@@ -1135,7 +1248,7 @@ def run(
         )
 
         write_pfm(disparity_scene_dir / "disp0.pfm", disparity)
-        disparity_preview = normalize_for_preview(disparity, disparity > 0)
+        disparity_preview = normalize_for_preview(display_disparity, display_disparity > 0)
         write_png(disparity_scene_dir / "disp0.png", disparity_preview)
         write_scene_text(
             disparity_scene_dir / "README.txt",
@@ -1161,6 +1274,8 @@ def run(
                 f"training_samples: {training_sample_count}",
                 f"trained_projection: {'yes' if training_state.trained else 'no'}",
                 f"fallback_coarse_matcher_used: {'yes' if fallback_used else 'no'}",
+                f"detail_disparity_range: {detail_min_disparity}..{detail_max_disparity}",
+                f"detail_sift_stereo_matches: {detail_stats['stereo_matches']}",
                 f"fine_detail_weight: {config.fine_detail_weight}",
                 f"token_median_filter_size: {config.token_median_filter_size}",
                 f"estimated_working_set_mb: {estimated_working_set_mb:.3f}",
@@ -1187,6 +1302,8 @@ def run(
 
         confidence_mask = np.isfinite(confidence) & (confidence > 0)
         confidence_preview = normalize_for_preview(confidence, confidence_mask)
+        if bool(np.any(confidence_mask)) and int(confidence_preview.max()) == 0:
+            confidence_preview[confidence_mask] = 255
         write_png(analysis_scene_dir / "confidence.png", confidence_preview)
 
         error_mask = error_map > 0
