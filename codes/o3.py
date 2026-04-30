@@ -1687,62 +1687,6 @@ def build_seed_disparity(
     return seed_disparity, seed_mask
 
 
-def interpolate_seed_rows(seed_disparity: Any, seed_mask: Any) -> tuple[Any, Any]:
-    """先沿行方向把稀疏种子插值成连续视差。"""
-
-    disparity = np.zeros_like(seed_disparity, dtype=np.float32)
-    row_mask = np.zeros_like(seed_mask, dtype=bool)
-    width = seed_disparity.shape[1]
-    columns = np.arange(width, dtype=np.float32)
-
-    for row_index in range(seed_disparity.shape[0]):
-        valid_columns = np.flatnonzero(seed_mask[row_index])
-        if valid_columns.size == 0:
-            continue
-        row_values = seed_disparity[row_index, valid_columns]
-        unique_columns, unique_indices = np.unique(valid_columns, return_index=True)
-        unique_values = row_values[unique_indices]
-        if unique_columns.size == 1:
-            disparity[row_index, :] = unique_values[0]
-        else:
-            disparity[row_index, :] = np.interp(columns, unique_columns.astype(np.float32), unique_values).astype(np.float32)
-        row_mask[row_index, :] = True
-
-    return disparity, row_mask
-
-
-def interpolate_seed_columns(row_disparity: Any, row_mask: Any) -> Any:
-    """再沿列方向补齐没有种子的行。"""
-
-    disparity = np.asarray(row_disparity, dtype=np.float32).copy()
-    valid_rows = np.flatnonzero(np.any(row_mask, axis=1))
-    if valid_rows.size == 0:
-        return disparity
-
-    if valid_rows.size == 1:
-        disparity[:, :] = disparity[valid_rows[0], :]
-        return disparity
-
-    first_row = int(valid_rows[0])
-    last_row = int(valid_rows[-1])
-    disparity[:first_row, :] = disparity[first_row, :]
-    disparity[last_row + 1 :, :] = disparity[last_row, :]
-
-    for start_row, end_row in zip(valid_rows[:-1], valid_rows[1:]):
-        start_index = int(start_row)
-        end_index = int(end_row)
-        if end_index - start_index <= 1:
-            continue
-        span = float(end_index - start_index)
-        top = disparity[start_index, :]
-        bottom = disparity[end_index, :]
-        for row_index in range(start_index + 1, end_index):
-            alpha = float(row_index - start_index) / span
-            disparity[row_index, :] = ((1.0 - alpha) * top) + (alpha * bottom)
-
-    return disparity.astype(np.float32)
-
-
 def propagate_sift_seed_disparity(seed_disparity: Any, seed_mask: Any, guide_gray: Any, config: O3Config) -> Any:
     """把 SIFT 匹配种子限定在局部邻域内传播，避免跨整图行列插值。"""
 
@@ -1902,34 +1846,29 @@ def inpaint_triangulated_disparity_holes(
 
 
 def triangulate_sift_seed_disparity(seed_disparity: Any, seed_mask: Any, guide_gray: Any, config: O3Config) -> Any:
-    """用 SIFT 匹配种子建立 Delaunay 三角网，生成连续的 SIFT-driven 视差面。"""
+    """用真实 SIFT 匹配种子建立 Delaunay 三角网，只在种子凸包内插值。"""
 
     filtered_seeds, filtered_mask = filter_sift_seed_outliers(seed_disparity, seed_mask)
     seed_rows, seed_columns = np.nonzero(filtered_mask)
     if seed_rows.size < 3:
-        return propagate_sift_seed_disparity(filtered_seeds, filtered_mask, guide_gray, config)
+        return np.zeros_like(filtered_seeds, dtype=np.float32)
 
     height, width = filtered_seeds.shape
     seed_points = np.column_stack((seed_columns.astype(np.float64), seed_rows.astype(np.float64)))
     seed_values = filtered_seeds[seed_rows, seed_columns].astype(np.float32)
-    triangulation_points, triangulation_values = add_sift_boundary_support_points(seed_points, seed_values, (height, width))
     try:
-        triangulation = Delaunay(triangulation_points)
+        triangulation = Delaunay(seed_points)
     except QhullError:
-        return propagate_sift_seed_disparity(filtered_seeds, filtered_mask, guide_gray, config)
+        return np.zeros_like(filtered_seeds, dtype=np.float32)
 
-    triangle_points = triangulation_points[triangulation.simplices]
+    triangle_points = seed_points[triangulation.simplices]
     edge_a = np.linalg.norm(triangle_points[:, 0] - triangle_points[:, 1], axis=1)
     edge_b = np.linalg.norm(triangle_points[:, 1] - triangle_points[:, 2], axis=1)
     edge_c = np.linalg.norm(triangle_points[:, 2] - triangle_points[:, 0], axis=1)
     max_triangle_edge = np.maximum.reduce((edge_a, edge_b, edge_c))
     typical_seed_spacing = float(np.sqrt((height * width) / max(1, seed_rows.size)))
     max_allowed_edge = float(np.clip(typical_seed_spacing * 5.5, 128.0, 520.0))
-    max_seed_distance = float(np.clip(typical_seed_spacing * 4.5, 128.0, 520.0))
-    max_hole_fill_distance = float(np.clip(typical_seed_spacing * 7.0, 192.0, 760.0))
 
-    distance_result: Any = ndimage.distance_transform_edt(~filtered_mask, return_distances=True, return_indices=False)
-    nearest_seed_distance = np.asarray(distance_result, dtype=np.float32)
     disparity = np.zeros((height, width), dtype=np.float32)
     total_pixels = height * width
     chunk_size = 250_000
@@ -1964,46 +1903,10 @@ def triangulate_sift_seed_disparity(seed_disparity: Any, seed_mask: Any, guide_g
                 1.0 - barycentric_head.sum(axis=1),
             )
         )
-        vertex_values = triangulation_values[triangulation.simplices[valid_simplex_indices]]
+        vertex_values = seed_values[triangulation.simplices[valid_simplex_indices]]
         interpolated_values = np.sum(vertex_values * barycentric_weights.astype(np.float32), axis=1)
         disparity.reshape(-1)[valid_flat_indices] = interpolated_values.astype(np.float32)
 
-    disparity = np.where(
-        (nearest_seed_distance <= max_seed_distance) & np.isfinite(disparity) & (disparity > 0),
-        disparity,
-        0.0,
-    ).astype(np.float32)
-    disparity = inpaint_triangulated_disparity_holes(
-        disparity,
-        guide_gray,
-        max_distance=max_hole_fill_distance,
-        iterations=28,
-    )
-    disparity = joint_weighted_median_filter_disparity(
-        disparity,
-        guide_gray,
-        radius=2,
-        sigma_color=10.0,
-        sigma_space=2.0,
-    )
-    disparity = fill_short_horizontal_disparity_gaps(
-        disparity,
-        guide_gray,
-        max_gap=24,
-        max_disparity_delta=3.0,
-        max_intensity_delta=24.0,
-    )
-    disparity = fill_short_vertical_disparity_gaps(
-        disparity,
-        guide_gray,
-        max_gap=12,
-        max_disparity_delta=3.0,
-        max_intensity_delta=24.0,
-    )
-    if config.median_filter_size > 1:
-        positive_mask = disparity > 0
-        filtered = median_filter_2d(disparity, config.median_filter_size)
-        disparity = np.where(positive_mask, filtered, 0.0).astype(np.float32)
     return np.where(np.isfinite(disparity) & (disparity > 0), disparity, 0.0).astype(np.float32)
 
 
