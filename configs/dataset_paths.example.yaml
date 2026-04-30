@@ -62,7 +62,7 @@ o4:
   num_folds: 5
   downsample_factor: 1
   patch_size: 2
-  max_disparity: 96
+  max_disparity: 288
   min_disparity: 0
   min_confidence: 0.02
   token_median_filter_size: 3
@@ -86,7 +86,7 @@ o4:
   max_training_samples: 20000
   weight_decay: 0.0001
   context_window_size: 3
-  fine_detail_weight: 0.35
+  fine_detail_weight: 0.0
   consistency_threshold: 1.0
   fill_invalid_passes: 2
   random_seed: 0

@@ -39,7 +39,7 @@ DISTINCT_TRANSFORM_FAMILIES = (
     "intensity",
 )
 
-MAX_VISUALIZED_SIFT_ITEMS = 20
+MAX_VISUALIZED_SIFT_ITEMS = 100
 
 MetricValue = str | float | int
 MetricRow = dict[str, MetricValue]

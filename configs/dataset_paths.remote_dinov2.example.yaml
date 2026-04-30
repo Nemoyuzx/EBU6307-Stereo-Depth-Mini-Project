@@ -13,7 +13,7 @@ results:
   o4c_fold_metrics_file: results/O4c_transformer_dinov2/fold_summary.csv
 
 o4:
-  downsample_factor: 2
+  downsample_factor: 1
   patch_size: 2
   max_disparity: 288
   min_disparity: 0
@@ -29,7 +29,7 @@ o4:
   disparity_regression: quadratic
   training_epochs: 0
   inference_batch_size: 4096
-  fine_detail_weight: 0.35
+  fine_detail_weight: 0.0
   consistency_threshold: 1.0
   fill_invalid_passes: 2
   random_seed: 0

@@ -80,8 +80,9 @@ class ResolveO4ExecutionModeTests(unittest.TestCase):
             )
 
         self.assertTrue(status.available)
-        self.assertEqual(status.descriptor_source, "dinov2_dense_descriptors")
-        self.assertIn("local checkpoint", status.reason)
+        self.assertEqual(status.descriptor_source, "dinov2_direct_model_patch_tokens")
+        self.assertIn("pretrained DINOv2 model forward pass", status.reason)
+        self.assertIn("checkpoint=", status.reason)
 
     def test_dinov2_mode_rejects_missing_repo_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

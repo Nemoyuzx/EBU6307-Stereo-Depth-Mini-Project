@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import csv
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
+from scipy import ndimage
 
 from common import (
     discover_scenes,
@@ -17,15 +19,11 @@ from common import (
     write_png,
     write_scene_text,
 )
-from config import O3Config, O4Config
+from config import O4Config
 from o3 import (
-    average_pool_2d,
     average_pool_gray,
     box_filter_sum,
     compute_horizontal_gradient,
-    compute_sgm_disparity,
-    collect_sift_stereo_stats,
-    estimate_scene_disparity_bounds,
     fill_disparity_with_local_weighted_median,
     fill_invalid_disparity,
     joint_weighted_median_filter_disparity,
@@ -33,7 +31,6 @@ from o3 import (
     median_filter_2d,
 )
 from o4_torch import (
-    average_pool_2d_torch,
     average_pool_gray_torch,
     build_token_descriptors_torch,
     build_token_ground_truth_torch,
@@ -504,50 +501,6 @@ def estimate_o4_working_set_mb(token_height: int, token_width: int, token_dim: i
     return float(total_bytes / (1024.0 * 1024.0))
 
 
-def build_o4_detail_config(config: O4Config) -> O3Config:
-    """为 O4 细节融合构建与当前 O3 正式路径一致的 SGM 配置。"""
-
-    return O3Config(
-        disparity_dir=config.disparity_dir,
-        analysis_dir=config.analysis_dir,
-        metrics_file=config.metrics_file,
-        max_features=800,
-        contrast_threshold=0.04,
-        ratio_test=0.8,
-        max_draw_matches=80,
-        num_disparities=96,
-        max_vertical_offset=2.0,
-        block_size=5,
-        uniqueness_ratio=0,
-        speckle_window_size=0,
-        speckle_range=8,
-        disp12_max_diff=1,
-        median_filter_size=3,
-        census_window_size=5,
-        census_weight=3.0,
-        gradient_weight=1.0,
-        consistency_threshold=1.0,
-        fill_invalid_passes=0,
-    )
-
-
-def compute_o4_detail_disparity(scene_dir: Path, left_gray: Any, right_gray: Any, detail_config: O3Config) -> tuple[Any, int, int, dict[str, int]]:
-    """计算 O4 最终可视化使用的高分辨率 SGM 细节视差。"""
-
-    min_disparity, max_disparity = estimate_scene_disparity_bounds(scene_dir, left_gray.shape, detail_config)
-    scene_detail_config = replace(detail_config, num_disparities=max(detail_config.num_disparities, max_disparity + 1))
-    detail_stats = collect_sift_stereo_stats(left_gray, right_gray, scene_detail_config)
-    detail_disparity = compute_sgm_disparity(
-        left_gray,
-        right_gray,
-        scene_detail_config,
-        min_disparity=min_disparity,
-        max_disparity=max_disparity,
-        feature_stereo_matches=detail_stats["stereo_matches"],
-    )
-    return detail_disparity.astype(np.float32), min_disparity, max_disparity, detail_stats
-
-
 def normalize_confidence_weights(confidence: Any) -> Any:
     """把 token 置信度压到 0..1，避免少数极值支配融合。"""
 
@@ -563,28 +516,8 @@ def normalize_confidence_weights(confidence: Any) -> Any:
     return weights
 
 
-def fuse_o4_disparity_with_detail(transformer_disparity: Any, detail_disparity: Any, confidence: Any, config: O4Config, token_span: int) -> Any:
-    """以高分辨率 SGM 为结构主体，只在可信且一致的位置引入 O4 token 先验。"""
-
-    token = np.asarray(transformer_disparity, dtype=np.float32)
-    detail = np.asarray(detail_disparity, dtype=np.float32)
-    token_valid = np.isfinite(token) & (token > 0)
-    detail_valid = np.isfinite(detail) & (detail > 0)
-    if not bool(np.any(detail_valid)):
-        return np.where(token_valid, token, 0.0).astype(np.float32)
-
-    fused = np.where(detail_valid, detail, 0.0).astype(np.float32)
-    confidence_weight = normalize_confidence_weights(confidence)
-    tolerance = max(4.0, float(token_span) * 0.35)
-    coherent = token_valid & detail_valid & (np.abs(token - detail) <= tolerance)
-    token_weight = min(0.20, max(0.0, 1.0 - float(config.fine_detail_weight)))
-    weights = (token_weight * confidence_weight).astype(np.float32)
-    fused = np.where(coherent, ((1.0 - weights) * detail) + (weights * token), fused).astype(np.float32)
-    return np.where(np.isfinite(fused) & (fused > 0), fused, 0.0).astype(np.float32)
-
-
 def build_o4_display_confidence(confidence: Any, disparity: Any) -> Any:
-    """生成与最终融合视差一致的 confidence 预览，避免低分辨率 token 方块主导显示。"""
+    """生成与最终 token 视差一致的 confidence 预览。"""
 
     disparity_source = np.asarray(disparity, dtype=np.float32)
     valid = np.isfinite(disparity_source) & (disparity_source > 0)
@@ -593,23 +526,71 @@ def build_o4_display_confidence(confidence: Any, disparity: Any) -> Any:
     return display_confidence.astype(np.float32)
 
 
+def filter_o4_reliable_disparity(disparity: Any, confidence: Any, min_confidence: float, confidence_percentile: float) -> tuple[Any, float, int]:
+    """按匹配置信度筛出正式 PFM 使用的可靠 token 预测。"""
+
+    source = np.asarray(disparity, dtype=np.float32)
+    conf = np.asarray(confidence, dtype=np.float32)
+    valid = np.isfinite(source) & (source > 0) & np.isfinite(conf) & (conf > 0)
+    if not bool(np.any(valid)):
+        return np.zeros_like(source, dtype=np.float32), float(min_confidence), 0
+
+    positive_confidence = conf[valid]
+    percentile_floor = float(np.percentile(positive_confidence, float(confidence_percentile)))
+    confidence_floor = max(float(min_confidence), percentile_floor)
+    reliable = valid & (conf >= confidence_floor)
+    filtered = np.where(reliable, source, 0.0).astype(np.float32)
+    return filtered, confidence_floor, int(np.count_nonzero(reliable))
+
+
+def fill_o4_preview_by_nearest(disparity: Any) -> Any:
+    """用最近可靠视差填满展示图，作为仅供 PNG 使用的连续初值。"""
+
+    source = np.asarray(disparity, dtype=np.float32)
+    valid = np.isfinite(source) & (source > 0)
+    if not bool(np.any(valid)):
+        return np.zeros_like(source, dtype=np.float32)
+    indices = ndimage.distance_transform_edt(~valid, return_distances=False, return_indices=True)
+    filled = source[tuple(indices)]
+    return np.where(np.isfinite(filled) & (filled > 0), filled, 0.0).astype(np.float32)
+
+
+def guided_smooth_o4_preview(disparity: Any, guide_gray: Any) -> Any:
+    """用左图引导滤波去掉最近邻填充的硬边界，让 PNG 预览更像连续深度图。"""
+
+    source = np.asarray(disparity, dtype=np.float32)
+    guide = np.asarray(guide_gray, dtype=np.float32)
+    guide = (guide - float(guide.min())) / max(float(guide.max() - guide.min()), 1.0)
+    guide = guide.astype(np.float32)
+    if hasattr(cv2, "ximgproc") and hasattr(cv2.ximgproc, "guidedFilter"):
+        return cv2.ximgproc.guidedFilter(guide=guide, src=source.astype(np.float32), radius=9, eps=1e-3).astype(np.float32)
+    return cv2.bilateralFilter(source.astype(np.float32), d=11, sigmaColor=6.0, sigmaSpace=13.0).astype(np.float32)
+
+
 def build_o4_preview_disparity(disparity: Any, guide_gray: Any) -> Any:
-    """为 PNG 预览生成更连续的视差图，不改变写入 PFM 的可靠像素集合。"""
+    """为 PNG 预览生成连续视差图，不改变写入 PFM 的可靠像素集合。"""
 
     preview = np.asarray(disparity, dtype=np.float32).copy()
     if not bool(np.any(np.isfinite(preview) & (preview > 0))):
         return preview
 
-    for _ in range(2):
+    for radius, sigma_color, sigma_space, min_count in ((2, 10.0, 1.6, 5), (3, 12.0, 2.0, 10)):
         preview = fill_disparity_with_local_weighted_median(
             preview,
             guide_gray,
-            radius=3,
-            sigma_color=12.0,
-            sigma_space=2.0,
-            min_count=6,
+            radius=radius,
+            sigma_color=sigma_color,
+            sigma_space=sigma_space,
+            min_count=min_count,
         )
-    preview = fill_invalid_disparity(preview, 1)
+    valid = np.isfinite(preview) & (preview > 0)
+    valid_values = preview[valid]
+    low = float(np.percentile(valid_values, 1.0))
+    high = float(np.percentile(valid_values, 99.0))
+    if high > low:
+        dense_preview = np.clip(fill_o4_preview_by_nearest(preview), low, high)
+        smoothed_preview = np.clip(guided_smooth_o4_preview(dense_preview, guide_gray), low, high)
+        preview = np.where(valid, (0.85 * preview) + (0.15 * smoothed_preview), smoothed_preview).astype(np.float32)
     filtered = joint_weighted_median_filter_disparity(
         preview,
         guide_gray,
@@ -672,6 +653,8 @@ def validate_results(disparity_dir: Path, analysis_dir: Path, metrics_file: Path
         required_paths = (
             disparity_scene_dir / "disp0.pfm",
             disparity_scene_dir / "disp0.png",
+            disparity_scene_dir / "disp0_transformer_raw.pfm",
+            disparity_scene_dir / "disp0_transformer_raw.png",
             analysis_scene_dir / "confidence.png",
             analysis_scene_dir / "error_map.png",
         )
@@ -718,9 +701,9 @@ def run(
         execution_status = type("O4ExecutionModeStatus", (), {
             "requested_mode": "baseline",
             "selected_mode": "baseline",
-            "descriptor_source": "handcrafted_patch_tokens",
+            "descriptor_source": "trainable_stereo_transformer_tokens",
             "available": True,
-            "reason": "using the existing trainable token projection baseline",
+            "reason": "using the trainable stereo Transformer token encoder baseline",
         })()
 
     if max_scenes is not None:
@@ -795,6 +778,11 @@ def run(
         print(f"O4 execution mode unavailable: {execution_status.reason}", file=sys.stderr)
         return 1
 
+    if execution_status.selected_mode == "dinov2_cost_volume":
+        from o4_dinov2 import run_dinov2_objective
+
+        return run_dinov2_objective(repo_root, middlebury_root, config, max_scenes, dry_run=False, scene_name=scene_name)
+
     config.disparity_dir.mkdir(parents=True, exist_ok=True)
     config.analysis_dir.mkdir(parents=True, exist_ok=True)
     use_cuda_o4 = backend_status.use_torch and backend_status.device == "cuda"
@@ -809,33 +797,7 @@ def run(
     for scene_dir in payload_scene_dirs:
         left_gray = load_gray(scene_dir / "im0.png")
         right_gray = load_gray(scene_dir / "im1.png")
-        if execution_status.selected_mode == "dinov2_cost_volume":
-            from o4_dinov2 import extract_dinov2_descriptors
-
-            try:
-                left_descriptors, _, _, model_patch_size = extract_dinov2_descriptors(
-                    left_gray,
-                    downsample_factor=config.downsample_factor,
-                    model_name=config.dinov2_model_name,
-                    repo_path=config.dinov2_repo_path,
-                    checkpoint_path=config.dinov2_checkpoint_path,
-                    device=backend_status.device,
-                    return_numpy=not use_cuda_o4,
-                )
-                right_descriptors, _, _, _ = extract_dinov2_descriptors(
-                    right_gray,
-                    downsample_factor=config.downsample_factor,
-                    model_name=config.dinov2_model_name,
-                    repo_path=config.dinov2_repo_path,
-                    checkpoint_path=config.dinov2_checkpoint_path,
-                    device=backend_status.device,
-                    return_numpy=not use_cuda_o4,
-                )
-            except Exception as exc:
-                print(f"Failed to initialize O4 dinov2_cost_volume for scene {scene_dir.name}: {exc}", file=sys.stderr)
-                return 1
-            token_span = config.downsample_factor * model_patch_size
-        elif use_cuda_o4:
+        if use_cuda_o4:
             downsampled_left = average_pool_gray_torch(left_gray, config.downsample_factor, device=backend_status.device)
             downsampled_right = average_pool_gray_torch(right_gray, config.downsample_factor, device=backend_status.device)
             left_descriptors, _, _ = build_token_descriptors_torch(
@@ -931,8 +893,6 @@ def run(
             )
             fold_training_stats[fold_index] = (int(training_descriptors.shape[0]), fold_models[fold_index])
 
-    detail_config = build_o4_detail_config(config)
-
     metric_rows: list[MetricRow] = []
     for scene_dir in scenes:
         payload = next(item for item in scene_payloads if item["scene_name"] == scene_dir.name)
@@ -961,12 +921,6 @@ def run(
                 device=model_state.device,
                 return_numpy=not use_cuda_scene,
             )
-        elif execution_status.selected_mode == "dinov2_cost_volume" and use_cuda_scene:
-            left_tokens = payload["left_descriptors"]
-            right_tokens = payload["right_descriptors"]
-        elif execution_status.selected_mode == "dinov2_cost_volume":
-            left_tokens = payload["left_descriptors"]
-            right_tokens = payload["right_descriptors"]
         elif use_cuda_o4:
             left_tokens = payload["left_descriptors"]
             right_tokens = payload["right_descriptors"]
@@ -987,12 +941,7 @@ def run(
             training_sample_count = 0
             training_state = model_state
         fallback_used = execution_status.selected_mode == "baseline" and not training_state.trained
-        detail_disparity, detail_min_disparity, detail_max_disparity, detail_stats = compute_o4_detail_disparity(
-            scene_dir,
-            payload["left_gray"],
-            payload["right_gray"],
-            detail_config,
-        )
+        display_source_disparity = None
 
         if fallback_used:
             fallback_downsample_factor = max(config.downsample_factor, 2)
@@ -1044,6 +993,7 @@ def run(
                     payload["left_gray"].shape[1],
                     device=backend_status.device,
                 ).detach().cpu().numpy().astype(np.float32)
+                display_source_disparity = disparity
             else:
                 fallback_left = average_pool_gray(payload["left_gray"], fallback_downsample_factor)
                 fallback_right = average_pool_gray(payload["right_gray"], fallback_downsample_factor)
@@ -1077,6 +1027,7 @@ def run(
                     payload["left_gray"].shape[0],
                     payload["left_gray"].shape[1],
                 ).astype(np.float32)
+                display_source_disparity = disparity
         else:
             if use_cuda_scene:
                 token_disparity, token_confidence, token_scores = predict_token_disparity_torch(
@@ -1118,33 +1069,37 @@ def run(
                     device=model_state.device,
                 )
                 confidence_tokens = token_confidence.masked_fill(token_confidence < config.min_confidence, 0.0).float()
-                refined_token_disparity = refined_token_disparity.masked_fill(~consistency_mask, 0.0).float()
-                refined_token_disparity = fill_invalid_disparity_torch(
-                    refined_token_disparity,
+                official_token_disparity = refined_token_disparity.masked_fill(~consistency_mask, 0.0).float()
+                display_token_disparity = fill_invalid_disparity_torch(
+                    official_token_disparity,
                     config.fill_invalid_passes,
                     device=model_state.device,
                 )
                 if config.token_median_filter_size > 1:
-                    token_mask = refined_token_disparity > 0
-                    filtered = median_filter_2d_torch(
-                        refined_token_disparity,
+                    token_mask = official_token_disparity > 0
+                    filtered_official = median_filter_2d_torch(
+                        official_token_disparity,
                         config.token_median_filter_size,
                         device=model_state.device,
                     )
-                    refined_token_disparity = filtered.masked_fill(~token_mask, 0.0).float()
-                disparity_tokens = refined_token_disparity.float() * float(token_span)
-                import torch
-
-                detail_tokens = average_pool_2d_torch(
-                    torch.as_tensor(detail_disparity, dtype=torch.float32, device=model_state.device),
-                    token_span,
-                    device=model_state.device,
-                )
-                detail_tokens = detail_tokens[: disparity_tokens.shape[0], : disparity_tokens.shape[1]].float()
-                detail_tokens = detail_tokens.masked_fill(disparity_tokens <= 0, 0.0)
-                disparity_tokens = ((1.0 - config.fine_detail_weight) * disparity_tokens) + (config.fine_detail_weight * detail_tokens)
+                    official_token_disparity = filtered_official.masked_fill(~token_mask, 0.0).float()
+                    display_mask = display_token_disparity > 0
+                    filtered_display = median_filter_2d_torch(
+                        display_token_disparity,
+                        config.token_median_filter_size,
+                        device=model_state.device,
+                    )
+                    display_token_disparity = filtered_display.masked_fill(~display_mask, 0.0).float()
+                disparity_tokens = official_token_disparity.float() * float(token_span)
                 disparity = upsample_token_grid_torch(
                     disparity_tokens,
+                    token_span,
+                    payload["left_gray"].shape[0],
+                    payload["left_gray"].shape[1],
+                    device=model_state.device,
+                ).detach().cpu().numpy().astype(np.float32)
+                display_source_disparity = upsample_token_grid_torch(
+                    display_token_disparity.float() * float(token_span),
                     token_span,
                     payload["left_gray"].shape[0],
                     payload["left_gray"].shape[1],
@@ -1203,19 +1158,24 @@ def run(
                     config.consistency_threshold,
                 )
                 confidence_tokens = np.where(token_confidence >= config.min_confidence, token_confidence, 0.0).astype(np.float32)
-                refined_token_disparity = np.where(consistency_mask, refined_token_disparity, 0.0).astype(np.float32)
-                refined_token_disparity = fill_invalid_disparity(refined_token_disparity, config.fill_invalid_passes)
+                official_token_disparity = np.where(consistency_mask, refined_token_disparity, 0.0).astype(np.float32)
+                display_token_disparity = fill_invalid_disparity(official_token_disparity, config.fill_invalid_passes)
                 if config.token_median_filter_size > 1:
-                    token_mask = refined_token_disparity > 0
-                    filtered = median_filter_2d(refined_token_disparity, config.token_median_filter_size)
-                    refined_token_disparity = np.where(token_mask, filtered, 0.0).astype(np.float32)
-                disparity_tokens = refined_token_disparity.astype(np.float32) * float(token_span)
-                detail_tokens = average_pool_2d(detail_disparity.astype(np.float32), token_span)
-                detail_tokens = detail_tokens[: disparity_tokens.shape[0], : disparity_tokens.shape[1]].astype(np.float32)
-                detail_tokens = np.where(disparity_tokens > 0, detail_tokens, 0.0)
-                disparity_tokens = ((1.0 - config.fine_detail_weight) * disparity_tokens) + (config.fine_detail_weight * detail_tokens)
+                    token_mask = official_token_disparity > 0
+                    filtered_official = median_filter_2d(official_token_disparity, config.token_median_filter_size)
+                    official_token_disparity = np.where(token_mask, filtered_official, 0.0).astype(np.float32)
+                    display_mask = display_token_disparity > 0
+                    filtered_display = median_filter_2d(display_token_disparity, config.token_median_filter_size)
+                    display_token_disparity = np.where(display_mask, filtered_display, 0.0).astype(np.float32)
+                disparity_tokens = official_token_disparity.astype(np.float32) * float(token_span)
                 disparity = upsample_token_grid(
                     disparity_tokens,
+                    token_span,
+                    payload["left_gray"].shape[0],
+                    payload["left_gray"].shape[1],
+                ).astype(np.float32)
+                display_source_disparity = upsample_token_grid(
+                    display_token_disparity.astype(np.float32) * float(token_span),
                     token_span,
                     payload["left_gray"].shape[0],
                     payload["left_gray"].shape[1],
@@ -1227,9 +1187,13 @@ def run(
                     payload["left_gray"].shape[1],
                 ).astype(np.float32)
 
-        disparity = fuse_o4_disparity_with_detail(disparity, detail_disparity, confidence, config, token_span)
+        raw_transformer_disparity = np.where(np.isfinite(disparity) & (disparity > 0), disparity, 0.0).astype(np.float32)
+        disparity = display_source_disparity if display_source_disparity is not None else raw_transformer_disparity
+        disparity = np.where(np.isfinite(disparity) & (disparity > 0), disparity, 0.0).astype(np.float32)
+        reliable_confidence_floor = float(config.min_confidence)
+        reliable_pixel_count = int(np.count_nonzero(disparity > 0))
         display_disparity = build_o4_preview_disparity(disparity, payload["left_gray"])
-        confidence = build_o4_display_confidence(confidence, display_disparity)
+        display_confidence = build_o4_display_confidence(confidence, display_disparity)
 
         disparity_scene_dir = config.disparity_dir / scene_dir.name
         analysis_scene_dir = config.analysis_dir / scene_dir.name
@@ -1241,13 +1205,12 @@ def run(
             left_tokens.shape[1],
             left_tokens.shape[2],
         )
-        generator_name = (
-            "O4 DINOv2 dense cost-volume stereo"
-            if payload["execution_mode"] == "dinov2_cost_volume"
-            else "O4 trainable token projection with consistency filtering"
-        )
+        generator_name = "O4 trainable stereo Transformer token disparity"
 
         write_pfm(disparity_scene_dir / "disp0.pfm", disparity)
+        write_pfm(disparity_scene_dir / "disp0_transformer_raw.pfm", raw_transformer_disparity)
+        raw_disparity_preview = normalize_for_preview(raw_transformer_disparity, raw_transformer_disparity > 0)
+        write_png(disparity_scene_dir / "disp0_transformer_raw.png", raw_disparity_preview)
         disparity_preview = normalize_for_preview(display_disparity, display_disparity > 0)
         write_png(disparity_scene_dir / "disp0.png", disparity_preview)
         write_scene_text(
@@ -1264,6 +1227,10 @@ def run(
                 f"requested_execution_mode: {config.execution_mode}",
                 f"resolved_execution_mode: {payload['execution_mode']}",
                 f"descriptor_source: {payload['descriptor_source']}",
+                "final_disparity_source: O4 transformer token prediction",
+                "sgm_detail_fusion_used: no",
+                "raw_transformer_disparity: disp0_transformer_raw.pfm",
+                "official_pfm_selection: filled_transformer_prediction",
                 f"disparity_regression: {config.disparity_regression}",
                 f"runtime_device: {training_state.device}",
                 f"model_dim: {config.model_dim}",
@@ -1274,9 +1241,8 @@ def run(
                 f"training_samples: {training_sample_count}",
                 f"trained_projection: {'yes' if training_state.trained else 'no'}",
                 f"fallback_coarse_matcher_used: {'yes' if fallback_used else 'no'}",
-                f"detail_disparity_range: {detail_min_disparity}..{detail_max_disparity}",
-                f"detail_sift_stereo_matches: {detail_stats['stereo_matches']}",
-                f"fine_detail_weight: {config.fine_detail_weight}",
+                f"official_pfm_confidence_floor: {reliable_confidence_floor:.6f}",
+                f"official_pfm_reliable_pixels: {reliable_pixel_count}",
                 f"token_median_filter_size: {config.token_median_filter_size}",
                 f"estimated_working_set_mb: {estimated_working_set_mb:.3f}",
             ],
@@ -1300,8 +1266,8 @@ def run(
             valid_mask = (disparity > 0) & np.isfinite(ground_truth) & (ground_truth > 0)
             error_map[valid_mask] = np.abs(disparity[valid_mask] - ground_truth[valid_mask])
 
-        confidence_mask = np.isfinite(confidence) & (confidence > 0)
-        confidence_preview = normalize_for_preview(confidence, confidence_mask)
+        confidence_mask = np.isfinite(display_confidence) & (display_confidence > 0)
+        confidence_preview = normalize_for_preview(display_confidence, confidence_mask)
         if bool(np.any(confidence_mask)) and int(confidence_preview.max()) == 0:
             confidence_preview[confidence_mask] = 255
         write_png(analysis_scene_dir / "confidence.png", confidence_preview)
@@ -1311,7 +1277,8 @@ def run(
         error_color = np.stack([error_preview, error_preview, error_preview], axis=2)
         error_color[~error_mask] = 0
         write_png(analysis_scene_dir / "error_map.png", error_color)
-        mean_confidence = float(confidence[confidence_mask].mean()) if bool(np.any(confidence_mask)) else 0.0
+        reliable_confidence_mask = (disparity > 0) & np.isfinite(confidence)
+        mean_confidence = float(confidence[reliable_confidence_mask].mean()) if bool(np.any(reliable_confidence_mask)) else 0.0
         write_scene_text(
             analysis_scene_dir / "README.txt",
             [
@@ -1321,11 +1288,16 @@ def run(
                 f"resolved_backend: {training_state.backend}",
                 f"resolved_execution_mode: {payload['execution_mode']}",
                 f"descriptor_source: {payload['descriptor_source']}",
+                "final_disparity_source: O4 transformer token prediction",
+                "sgm_detail_fusion_used: no",
+                "official_pfm_selection: filled_transformer_prediction",
                 f"disparity_regression: {config.disparity_regression}",
                 f"runtime_device: {training_state.device}",
                 f"training_samples: {training_sample_count}",
                 f"trained_projection: {'yes' if training_state.trained else 'no'}",
                 f"fallback_coarse_matcher_used: {'yes' if fallback_used else 'no'}",
+                f"official_pfm_confidence_floor: {reliable_confidence_floor:.6f}",
+                f"official_pfm_reliable_pixels: {reliable_pixel_count}",
                 f"ground_truth_available: {'yes' if ground_truth_path.exists() else 'no'}",
                 f"mae: {metrics['mae'] if metrics['mae'] >= 0 else 'NA'}",
                 f"rmse: {metrics['rmse'] if metrics['rmse'] >= 0 else 'NA'}",

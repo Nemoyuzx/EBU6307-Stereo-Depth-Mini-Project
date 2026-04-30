@@ -587,21 +587,29 @@ def train_o4_torch_model(
     if device == "cuda":
         torch.cuda.manual_seed_all(int(random_seed))
 
-    class StereoTokenMLP(torch.nn.Module):
+    class StereoTokenTransformer(torch.nn.Module):
         def __init__(self, input_dim: int, embedding_dim: int, inner_dim: int, depth: int) -> None:
             super().__init__()
-            layers: list[torch.nn.Module] = []
-            current_dim = input_dim
-            total_layers = max(1, int(depth))
-            for _ in range(total_layers - 1):
-                layers.append(torch.nn.Linear(current_dim, inner_dim))
-                layers.append(torch.nn.GELU())
-                current_dim = inner_dim
-            layers.append(torch.nn.Linear(current_dim, embedding_dim))
-            self.encoder = torch.nn.Sequential(*layers)
+            self.sequence_length = min(4, max(1, int(input_dim)))
+            head_count = 4 if embedding_dim % 4 == 0 else 2 if embedding_dim % 2 == 0 else 1
+            self.input_projection = torch.nn.Linear(input_dim, embedding_dim * self.sequence_length)
+            self.position_embedding = torch.nn.Parameter(torch.zeros(1, self.sequence_length, embedding_dim))
+            encoder_layer = torch.nn.TransformerEncoderLayer(
+                d_model=embedding_dim,
+                nhead=head_count,
+                dim_feedforward=max(int(inner_dim), int(embedding_dim) * 2),
+                dropout=0.0,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            )
+            self.encoder = torch.nn.TransformerEncoder(encoder_layer, num_layers=max(1, int(depth)))
+            self.output_norm = torch.nn.LayerNorm(embedding_dim)
 
         def encode(self, inputs: torch.Tensor) -> torch.Tensor:
-            encoded = self.encoder(inputs)
+            sequence = self.input_projection(inputs).reshape(inputs.shape[0], self.sequence_length, -1)
+            encoded = self.encoder(sequence + self.position_embedding).mean(dim=1)
+            encoded = self.output_norm(encoded)
             return F.normalize(encoded, dim=-1, eps=1e-6)
 
         def forward(self, left: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:
@@ -613,7 +621,7 @@ def train_o4_torch_model(
             )
             return torch.einsum("bd,bkd->bk", left_embedding, candidate_embedding)
 
-    model = StereoTokenMLP(
+    model = StereoTokenTransformer(
         input_dim=feature_dim,
         embedding_dim=int(model_dim),
         inner_dim=max(int(hidden_dim), int(model_dim)),
