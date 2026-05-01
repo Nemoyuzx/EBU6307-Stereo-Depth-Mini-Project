@@ -39,6 +39,56 @@ OFFICIAL_MIDDLEBURY_2021_SCENES = {
 EXCLUDED_DATASET_DIR_NAMES = {"data", "o4_tiny_scene"}
 
 
+def content_bbox_from_gray(image: Any, threshold: float = 2.0, min_fraction: float = 0.005) -> tuple[int, int, int, int]:
+    """Return the non-black rectangular content bbox as (top, bottom, left, right)."""
+
+    source = np.asarray(image)
+    if source.ndim == 3:
+        source = source.max(axis=2)
+    if source.ndim != 2:
+        raise ValueError("content_bbox_from_gray expects a 2D grayscale image or an RGB image.")
+
+    height, width = source.shape
+    if height <= 0 or width <= 0:
+        return 0, height, 0, width
+
+    nonblack = np.isfinite(source) & (source.astype(np.float32) > float(threshold))
+    if not bool(np.any(nonblack)):
+        return 0, height, 0, width
+
+    row_min_count = max(1, int(round(width * float(min_fraction))))
+    col_min_count = max(1, int(round(height * float(min_fraction))))
+    valid_rows = np.flatnonzero(nonblack.sum(axis=1) >= row_min_count)
+    valid_cols = np.flatnonzero(nonblack.sum(axis=0) >= col_min_count)
+    if valid_rows.size == 0 or valid_cols.size == 0:
+        return 0, height, 0, width
+
+    return int(valid_rows[0]), int(valid_rows[-1] + 1), int(valid_cols[0]), int(valid_cols[-1] + 1)
+
+
+def rectangular_mask_from_bbox(shape: tuple[int, int], bbox: tuple[int, int, int, int]) -> Any:
+    height, width = int(shape[0]), int(shape[1])
+    top, bottom, left, right = bbox
+    top = max(0, min(height, int(top)))
+    bottom = max(top, min(height, int(bottom)))
+    left = max(0, min(width, int(left)))
+    right = max(left, min(width, int(right)))
+    mask = np.zeros((height, width), dtype=bool)
+    mask[top:bottom, left:right] = True
+    return mask
+
+
+def content_mask_from_gray(image: Any, threshold: float = 2.0, min_fraction: float = 0.005) -> Any:
+    source = np.asarray(image)
+    if source.ndim == 3:
+        shape = source.shape[:2]
+    elif source.ndim == 2:
+        shape = source.shape
+    else:
+        raise ValueError("content_mask_from_gray expects a 2D grayscale image or an RGB image.")
+    return rectangular_mask_from_bbox(shape, content_bbox_from_gray(image, threshold=threshold, min_fraction=min_fraction))
+
+
 def discover_scenes(middlebury_root: Path) -> list[Path]:
     """扫描 Middlebury 根目录，只返回项目真正要处理的标准场景目录。"""
     if not middlebury_root.exists():

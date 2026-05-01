@@ -69,6 +69,7 @@ class O4Config:
     dinov2_model_name: str
     dinov2_repo_path: Path | None
     dinov2_checkpoint_path: Path
+    dinov2_input_scale: int
     model_dim: int
     encoder_hidden_dim: int
     encoder_layers: int
@@ -85,6 +86,8 @@ class O4Config:
     fine_detail_weight: float
     consistency_threshold: float
     fill_invalid_passes: int
+    speckle_max_size: int
+    speckle_max_diff: float
     random_seed: int
 
 
@@ -193,17 +196,19 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
     if backend not in {"auto", "torch", "numpy"}:
         backend = "auto"
     device = str(o4_block.get("device", "auto")).strip().lower() or "auto"
-    if device not in {"auto", "cuda", "cpu"}:
+    explicit_cuda_device = device.startswith("cuda:") and device[5:].isdigit()
+    if device not in {"auto", "cuda", "cpu"} and not explicit_cuda_device:
         device = "auto"
     prefer_cuda = bool(o4_block.get("prefer_cuda", True))
     execution_mode = str(o4_block.get("execution_mode", "baseline")).strip().lower() or "baseline"
-    if execution_mode not in {"baseline", "dinov2_cost_volume"}:
+    if execution_mode not in {"baseline", "baseline_sgm", "dinov2_cost_volume"}:
         raise ValueError(
-            "o4.execution_mode must be one of: baseline, dinov2_cost_volume"
+            "o4.execution_mode must be one of: baseline, baseline_sgm, dinov2_cost_volume"
         )
     dinov2_model_name = str(o4_block.get("dinov2_model_name", "facebook/dinov2-base")).strip() or "facebook/dinov2-base"
     dinov2_repo_value = o4_block.get("dinov2_repo_path")
     dinov2_checkpoint_value = o4_block.get("dinov2_checkpoint_path")
+    dinov2_input_scale = max(1, int(o4_block.get("dinov2_input_scale", 1)))
     from o4_dinov2 import resolve_dinov2_checkpoint_path
     model_dim = max(4, int(o4_block.get("model_dim", 24)))
     encoder_hidden_dim = max(model_dim, int(o4_block.get("encoder_hidden_dim", max(64, model_dim * 2))))
@@ -225,6 +230,8 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
     fine_detail_weight = max(0.0, float(o4_block.get("fine_detail_weight", 0.35)))
     consistency_threshold = max(0.0, float(o4_block.get("consistency_threshold", 1.0)))
     o4_fill_invalid_passes = max(0, int(o4_block.get("fill_invalid_passes", 2)))
+    speckle_max_size = max(0, int(o4_block.get("speckle_max_size", 0)))
+    speckle_max_diff = max(0.0, float(o4_block.get("speckle_max_diff", 1.0)))
     random_seed = int(o4_block.get("random_seed", 0))
 
     middlebury_root = resolve_path(repo_root, middlebury_value)
@@ -295,6 +302,7 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
                 repo_root,
                 str(resolve_dinov2_checkpoint_path(dinov2_model_name, dinov2_checkpoint_value)),
             ),
+            dinov2_input_scale=dinov2_input_scale,
             model_dim=model_dim,
             encoder_hidden_dim=encoder_hidden_dim,
             encoder_layers=encoder_layers,
@@ -311,6 +319,8 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
             fine_detail_weight=fine_detail_weight,
             consistency_threshold=consistency_threshold,
             fill_invalid_passes=o4_fill_invalid_passes,
+            speckle_max_size=speckle_max_size,
+            speckle_max_diff=speckle_max_diff,
             random_seed=random_seed,
         ),
     )

@@ -24,7 +24,7 @@ def build_objective_parser(objective: str, module_file: str) -> argparse.Argumen
     parser.add_argument('--scene-name', default=None, help='Run only one scene by exact directory name.')
     parser.add_argument('--dry-run', action='store_true', help='Print discovery/config info without writing outputs.')
     parser.add_argument('--validate-results', action='store_true', help='Validate existing outputs without rewriting them.')
-    parser.add_argument('--o4-execution-mode', choices=('baseline', 'dinov2_cost_volume'), default=None)
+    parser.add_argument('--o4-execution-mode', choices=('baseline', 'baseline_sgm', 'dinov2_cost_volume'), default=None)
     parser.add_argument('--o4-dinov2-model', default=None)
     parser.add_argument('--o4-dinov2-checkpoint', type=Path, default=None)
     parser.add_argument('--o4-dinov2-repo', type=Path, default=None)

@@ -152,6 +152,58 @@ conda activate ebu6307-stereo
 bash scripts/setup_remote_conda.sh
 ```
 
+## O4 远端脚本
+
+仓库现在提供一套 O4 远端运行脚本，按“上传代码 -> 远端运行 -> 下载结果”三步使用。
+
+### 1. 上传代码到远端
+
+```bash
+bash scripts/o4_remote_upload.sh
+```
+
+默认上传到：`root@14.103.233.39:/root/code/new_folder/openclaw-operate`
+
+### 2. 在远端运行 O4
+
+完整运行：
+
+```bash
+bash scripts/o4_remote_run.sh
+```
+
+运行单个场景：
+
+```bash
+bash scripts/o4_remote_run.sh -- --scene-name artroom1
+```
+
+只做 dry-run：
+
+```bash
+bash scripts/o4_remote_run.sh -- --dry-run --max-scenes 0
+```
+
+### 3. 下载远端结果到本地
+
+```bash
+bash scripts/o4_remote_download.sh
+```
+
+会把远端 `results/O4a_transformer`、`results/O4b_transformer`、`results/O4c_transformer` 以及对应日志打包下载并解压到本地 `results/`。
+
+### 可覆盖环境变量
+
+如果需要改远端地址、端口、远端目录或 Python，可在命令前覆盖：
+
+```bash
+REMOTE_HOST=root@example.com \
+REMOTE_PORT=22 \
+REMOTE_PROJECT_DIR=/root/code/openclaw-operate \
+REMOTE_PYTHON=/root/miniconda3/envs/ebu6307-whitelist/bin/python \
+bash scripts/o4_remote_run.sh
+```
+
 
 ## 记录
 

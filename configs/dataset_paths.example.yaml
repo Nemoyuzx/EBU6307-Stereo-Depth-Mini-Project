@@ -64,31 +64,37 @@ o4:
   patch_size: 2
   max_disparity: 288
   min_disparity: 0
-  min_confidence: 0.02
-  token_median_filter_size: 3
+  min_confidence: 0.005
+  token_median_filter_size: 5
   backend: auto
-  device: auto
+  # Use cuda:1 on the remote machine to avoid occupying GPU0.
+  device: cuda:1
   prefer_cuda: true
-  execution_mode: baseline
+  # execution_mode 取值：baseline (token argmin + LR consistency)、
+  #                   baseline_sgm (ViT 余弦得分 → O3 风格 SGM 聚合)、
+  #                   dinov2_cost_volume (DINOv2 特征代价体)。
+  execution_mode: baseline_sgm
   dinov2_model_name: facebook/dinov2-base
   dinov2_repo_path: workspace/external/dinov2
   dinov2_checkpoint_path: workspace/checkpoints/dinov2_vitb14_reg4_pretrain.pth
-  model_dim: 48
-  encoder_hidden_dim: 96
-  encoder_layers: 2
+  model_dim: 96
+  encoder_hidden_dim: 384
+  encoder_layers: 4
   disparity_regression: quadratic
   softmax_temperature: 1.0
-  training_epochs: 24
-  training_learning_rate: 0.001
-  training_batch_size: 1024
+  training_epochs: 90
+  training_learning_rate: 0.0005
+  training_batch_size: 1536
   inference_batch_size: 4096
-  negative_samples: 6
-  max_training_samples: 20000
-  weight_decay: 0.0001
+  negative_samples: 12
+  max_training_samples: 60000
+  weight_decay: 0.0003
   context_window_size: 3
   fine_detail_weight: 0.0
   consistency_threshold: 1.0
-  fill_invalid_passes: 2
+  fill_invalid_passes: 4
+  speckle_max_size: 100
+  speckle_max_diff: 1.5
   random_seed: 0
 
 # Recommended O4 local DINOv2 base candidate:

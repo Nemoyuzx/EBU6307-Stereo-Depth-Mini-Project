@@ -56,7 +56,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--o4-execution-mode",
-        choices=("baseline", "dinov2_cost_volume"),
+        choices=("baseline", "baseline_sgm", "dinov2_cost_volume"),
         default=None,
         help="Override the O4 execution mode. Only used with --objective o4.",
     )

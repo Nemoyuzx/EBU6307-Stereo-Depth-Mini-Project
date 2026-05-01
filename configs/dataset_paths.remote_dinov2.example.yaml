@@ -20,15 +20,26 @@ o4:
   min_confidence: 0.02
   token_median_filter_size: 3
   backend: auto
-  device: auto
+  # Use GPU1 on the remote machine to avoid occupying GPU0.
+  device: cuda:1
   prefer_cuda: true
   execution_mode: dinov2_cost_volume
   dinov2_model_name: facebook/dinov2-base
+  # DINOv2 patch size is 14; scale=7 lowers the effective token span to 2 px.
+  dinov2_input_scale: 7
   dinov2_repo_path: workspace/external/dinov2
   dinov2_checkpoint_path: /limx_embop/tos/users/Nemo/self-work/models/dinov2_vitb14_reg4_pretrain.pth
+  model_dim: 96
+  encoder_hidden_dim: 384
+  encoder_layers: 3
   disparity_regression: quadratic
-  training_epochs: 0
+  training_epochs: 12
+  training_learning_rate: 0.0005
+  training_batch_size: 1024
   inference_batch_size: 4096
+  negative_samples: 8
+  max_training_samples: 12000
+  weight_decay: 0.0003
   fine_detail_weight: 0.0
   consistency_threshold: 1.0
   fill_invalid_passes: 2

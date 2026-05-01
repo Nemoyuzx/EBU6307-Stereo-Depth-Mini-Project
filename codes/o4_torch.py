@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import math
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -219,14 +221,22 @@ def collect_o4_training_samples_torch(scene_payloads: list[dict[str, Any]], eval
         if sample_count == 0:
             continue
 
-        negatives = torch.randint(
-            min_disparity,
-            max_disparity + 1,
-            (sample_count, negative_samples),
-            generator=generator,
-            device=device,
-            dtype=torch.int64,
-        )
+        hard_count = min(negative_samples, 6)
+        hard_offsets = torch.tensor((1, -1, 2, -2, 3, -3), dtype=torch.int64, device=device)[:hard_count]
+        hard_negatives = disparities[:, None] + hard_offsets[None, :]
+        random_count = negative_samples - hard_count
+        if random_count > 0:
+            random_negatives = torch.randint(
+                min_disparity,
+                max_disparity + 1,
+                (sample_count, random_count),
+                generator=generator,
+                device=device,
+                dtype=torch.int64,
+            )
+            negatives = torch.cat([hard_negatives, random_negatives], dim=1)
+        else:
+            negatives = hard_negatives
         valid_negative = (
             (negatives != disparities[:, None])
             & ((cols[:, None] - negatives) >= 0)
@@ -493,6 +503,86 @@ class TorchBackendStatus:
     reason: str
 
 
+class StereoTokenTransformer(torch.nn.Module):
+    def __init__(self, input_dim: int, embedding_dim: int, inner_dim: int, depth: int) -> None:
+        super().__init__()
+        self.input_dim = int(input_dim)
+        self.embedding_dim = int(embedding_dim)
+        self.inner_dim = int(inner_dim)
+        self.depth = int(depth)
+        self.sequence_length = min(8, max(4, (self.input_dim + 2) // 3))
+        head_count = 8 if self.embedding_dim % 8 == 0 else 4 if self.embedding_dim % 4 == 0 else 2 if self.embedding_dim % 2 == 0 else 1
+        self.input_norm = torch.nn.LayerNorm(self.input_dim)
+        self.input_projection = torch.nn.Linear(self.input_dim, self.embedding_dim * self.sequence_length)
+        self.token_norm = torch.nn.LayerNorm(self.embedding_dim)
+        self.cls_token = torch.nn.Parameter(torch.zeros(1, 1, self.embedding_dim))
+        self.position_embedding = torch.nn.Parameter(torch.zeros(1, self.sequence_length + 1, self.embedding_dim))
+        self.logit_scale = torch.nn.Parameter(torch.tensor(2.302585093, dtype=torch.float32))
+        encoder_layer = torch.nn.TransformerEncoderLayer(
+            d_model=self.embedding_dim,
+            nhead=head_count,
+            dim_feedforward=max(self.inner_dim, self.embedding_dim * 2),
+            dropout=0.0,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.encoder = torch.nn.TransformerEncoder(encoder_layer, num_layers=max(1, self.depth))
+        self.output_head = torch.nn.Sequential(
+            torch.nn.LayerNorm(self.embedding_dim),
+            torch.nn.Linear(self.embedding_dim, self.embedding_dim),
+            torch.nn.GELU(),
+            torch.nn.Linear(self.embedding_dim, self.embedding_dim),
+            torch.nn.LayerNorm(self.embedding_dim),
+        )
+        torch.nn.init.trunc_normal_(self.cls_token, std=0.02)
+        torch.nn.init.trunc_normal_(self.position_embedding, std=0.02)
+        self.parameter_count = int(sum(parameter.numel() for parameter in self.parameters() if parameter.requires_grad))
+
+    def encode(self, inputs: torch.Tensor) -> torch.Tensor:
+        tokens = self.input_projection(self.input_norm(inputs)).reshape(inputs.shape[0], self.sequence_length, -1)
+        tokens = self.token_norm(tokens)
+        cls_tokens = self.cls_token.expand(inputs.shape[0], -1, -1)
+        sequence = torch.cat([cls_tokens, tokens], dim=1)
+        encoded_sequence = self.encoder(sequence + self.position_embedding)
+        encoded = (0.5 * encoded_sequence[:, 0]) + (0.5 * encoded_sequence[:, 1:].mean(dim=1))
+        encoded = self.output_head(encoded)
+        return F.normalize(encoded, dim=-1, eps=1e-6)
+
+    def forward(self, left: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:
+        left_embedding = self.encode(left)
+        candidate_embedding = self.encode(candidates.reshape(-1, candidates.shape[-1])).reshape(
+            candidates.shape[0],
+            candidates.shape[1],
+            -1,
+        )
+        similarity = torch.einsum("bd,bkd->bk", left_embedding, candidate_embedding)
+        return self.logit_scale.exp().clamp(max=50.0) * similarity
+
+
+def build_stereo_token_transformer(input_dim: int, model_dim: int, hidden_dim: int, encoder_layers: int, *, device: str) -> Any:
+    model = StereoTokenTransformer(
+        input_dim=int(input_dim),
+        embedding_dim=int(model_dim),
+        inner_dim=max(int(hidden_dim), int(model_dim)),
+        depth=max(1, int(encoder_layers)),
+    ).to(device)
+    model.parameter_count = int(sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad))
+    return model
+
+
+def is_cuda_device_name(device_name: str) -> bool:
+    normalized = str(device_name or "").strip().lower()
+    return normalized == "cuda" or (normalized.startswith("cuda:") and normalized[5:].isdigit())
+
+
+def cuda_device_index(device_name: str) -> int | None:
+    normalized = str(device_name or "").strip().lower()
+    if normalized.startswith("cuda:") and normalized[5:].isdigit():
+        return int(normalized[5:])
+    return None
+
+
 def resolve_torch_backend(
     requested_backend: str,
     requested_device: str,
@@ -523,19 +613,28 @@ def resolve_torch_backend(
         )
 
     cuda_available = bool(torch.cuda.is_available())
-    if device_name == "cuda":
+    if is_cuda_device_name(device_name):
         if cuda_available:
+            requested_cuda_index = cuda_device_index(device_name)
+            visible_cuda_count = int(torch.cuda.device_count())
+            if requested_cuda_index is not None and requested_cuda_index >= visible_cuda_count:
+                return TorchBackendStatus(
+                    selected_backend="numpy" if backend_name == "auto" else "torch",
+                    use_torch=backend_name == "torch",
+                    device="cpu",
+                    reason=f"{device_name} requested but only {visible_cuda_count} CUDA device(s) are visible",
+                )
             return TorchBackendStatus(
                 selected_backend="torch",
                 use_torch=True,
-                device="cuda",
-                reason="configured for the torch backend on CUDA",
+                device=device_name,
+                reason=f"configured for the torch backend on {device_name}",
             )
         return TorchBackendStatus(
             selected_backend="numpy" if backend_name == "auto" else "torch",
             use_torch=backend_name == "torch",
             device="cpu",
-            reason="CUDA requested but torch.cuda.is_available() is false",
+            reason=f"{device_name} requested but torch.cuda.is_available() is false",
         )
 
     if device_name == "cpu":
@@ -584,73 +683,83 @@ def train_o4_torch_model(
         return None
 
     torch.manual_seed(int(random_seed))
-    if device == "cuda":
+    if is_cuda_device_name(device):
         torch.cuda.manual_seed_all(int(random_seed))
 
-    class StereoTokenTransformer(torch.nn.Module):
-        def __init__(self, input_dim: int, embedding_dim: int, inner_dim: int, depth: int) -> None:
-            super().__init__()
-            self.sequence_length = min(4, max(1, int(input_dim)))
-            head_count = 4 if embedding_dim % 4 == 0 else 2 if embedding_dim % 2 == 0 else 1
-            self.input_projection = torch.nn.Linear(input_dim, embedding_dim * self.sequence_length)
-            self.position_embedding = torch.nn.Parameter(torch.zeros(1, self.sequence_length, embedding_dim))
-            encoder_layer = torch.nn.TransformerEncoderLayer(
-                d_model=embedding_dim,
-                nhead=head_count,
-                dim_feedforward=max(int(inner_dim), int(embedding_dim) * 2),
-                dropout=0.0,
-                activation="gelu",
-                batch_first=True,
-                norm_first=True,
-            )
-            self.encoder = torch.nn.TransformerEncoder(encoder_layer, num_layers=max(1, int(depth)))
-            self.output_norm = torch.nn.LayerNorm(embedding_dim)
-
-        def encode(self, inputs: torch.Tensor) -> torch.Tensor:
-            sequence = self.input_projection(inputs).reshape(inputs.shape[0], self.sequence_length, -1)
-            encoded = self.encoder(sequence + self.position_embedding).mean(dim=1)
-            encoded = self.output_norm(encoded)
-            return F.normalize(encoded, dim=-1, eps=1e-6)
-
-        def forward(self, left: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:
-            left_embedding = self.encode(left)
-            candidate_embedding = self.encode(candidates.reshape(-1, candidates.shape[-1])).reshape(
-                candidates.shape[0],
-                candidates.shape[1],
-                -1,
-            )
-            return torch.einsum("bd,bkd->bk", left_embedding, candidate_embedding)
-
-    model = StereoTokenTransformer(
-        input_dim=feature_dim,
-        embedding_dim=int(model_dim),
-        inner_dim=max(int(hidden_dim), int(model_dim)),
-        depth=max(1, int(encoder_layers)),
-    ).to(device)
+    model = build_stereo_token_transformer(feature_dim, model_dim, hidden_dim, encoder_layers, device=device)
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(learning_rate),
         weight_decay=float(weight_decay),
+        betas=(0.9, 0.95),
     )
 
     left_tensor = _as_float_tensor(training_descriptors, device)
     candidate_tensor = _as_float_tensor(candidate_descriptors, device)
     target = torch.zeros((min(batch_size, left_tensor.shape[0]),), dtype=torch.long, device=device)
 
-    for _ in range(int(epochs)):
+    total_steps = max(1, int(epochs)) * max(1, (left_tensor.shape[0] + int(batch_size) - 1) // int(batch_size))
+    warmup_steps = max(1, total_steps // 20)
+    base_lr = float(learning_rate)
+    min_lr = base_lr * 0.05
+    global_step = 0
+    epoch_count = max(1, int(epochs))
+    log_interval = max(1, epoch_count // 10)
+
+    for epoch_index in range(epoch_count):
         order = torch.randperm(left_tensor.shape[0], device=device)
+        epoch_loss_sum = 0.0
+        epoch_correct = 0
+        epoch_total = 0
         for start in range(0, order.shape[0], int(batch_size)):
             batch_index = order[start : start + int(batch_size)]
             current_left = left_tensor.index_select(0, batch_index)
             current_candidates = candidate_tensor.index_select(0, batch_index)
             current_target = target[: batch_index.shape[0]]
 
+            if global_step < warmup_steps:
+                lr_scale = float(global_step + 1) / float(warmup_steps)
+                current_lr = base_lr * lr_scale
+            else:
+                progress = float(global_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+                progress = min(1.0, max(0.0, progress))
+                cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+                current_lr = min_lr + (base_lr - min_lr) * cosine
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = current_lr
+
             optimizer.zero_grad(set_to_none=True)
             logits = model(current_left, current_candidates)
-            loss = F.cross_entropy(logits, current_target)
+            loss = F.cross_entropy(logits, current_target, label_smoothing=0.05)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+
+            with torch.no_grad():
+                epoch_loss_sum += float(loss.detach()) * int(batch_index.shape[0])
+                epoch_correct += int((logits.argmax(dim=1) == current_target).sum().item())
+                epoch_total += int(batch_index.shape[0])
+            global_step += 1
+
+        if epoch_total > 0 and ((epoch_index + 1) % log_interval == 0 or epoch_index == epoch_count - 1 or epoch_index == 0):
+            mean_loss = epoch_loss_sum / max(1, epoch_total)
+            top1 = epoch_correct / max(1, epoch_total)
+            try:
+                logit_scale_value = float(model.logit_scale.exp().clamp(max=50.0).detach())
+            except Exception:
+                logit_scale_value = float("nan")
+            print(
+                "O4 train epoch {0:02d}/{1:02d}: loss={2:.4f} top1={3:.4f} lr={4:.2e} logit_scale={5:.2f}".format(
+                    epoch_index + 1,
+                    epoch_count,
+                    mean_loss,
+                    top1,
+                    current_lr,
+                    logit_scale_value,
+                ),
+                flush=True,
+            )
 
     model.eval()
     return model

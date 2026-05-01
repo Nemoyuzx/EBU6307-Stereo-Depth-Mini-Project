@@ -11,6 +11,7 @@ import numpy as np
 from scipy import ndimage
 
 from common import (
+    content_mask_from_gray,
     discover_scenes,
     evaluate_disparity,
     filter_scene_dirs,
@@ -24,11 +25,14 @@ from o3 import (
     average_pool_gray,
     box_filter_sum,
     compute_horizontal_gradient,
+    colorize_disparity_depth_map,
     fill_disparity_with_local_weighted_median,
     fill_invalid_disparity,
     joint_weighted_median_filter_disparity,
     left_right_consistency_mask,
     median_filter_2d,
+    solve_sgm_from_cost,
+    solve_sgm_from_cost_torch,
 )
 from o4_torch import (
     average_pool_gray_torch,
@@ -38,6 +42,7 @@ from o4_torch import (
     encode_o4_descriptors_torch,
     extract_baseline_patch_tokens_torch,
     fill_invalid_disparity_torch,
+    is_cuda_device_name,
     left_right_consistency_mask_torch,
     median_filter_2d_torch,
     predict_token_disparity_torch,
@@ -47,6 +52,7 @@ from o4_torch import (
     train_o4_torch_model,
     upsample_token_grid_torch,
 )
+from o4_dinov2 import O4ExecutionModeStatus
 from pfm import read_pfm, write_pfm
 
 
@@ -61,6 +67,54 @@ class O4ModelState:
     trained: bool
     projection: Any | None = None
     torch_model: Any | None = None
+    parameter_count: int = 0
+    checkpoint_path: Path | None = None
+
+
+def save_o4_model_checkpoint(path: Path, model_state: O4ModelState, config: O4Config, *, fold: int, sample_count: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if model_state.torch_model is not None:
+        import torch
+
+        torch.save(
+            {
+                "state_dict": model_state.torch_model.state_dict(),
+                "fold": int(fold),
+                "sample_count": int(sample_count),
+                "backend": "torch",
+                "device": str(model_state.device),
+                "input_dim": int(getattr(model_state.torch_model, "input_dim", 0)),
+                "model_dim": int(config.model_dim),
+                "encoder_hidden_dim": int(config.encoder_hidden_dim),
+                "encoder_layers": int(config.encoder_layers),
+                "training_epochs": int(config.training_epochs),
+                "training_learning_rate": float(config.training_learning_rate),
+                "training_batch_size": int(config.training_batch_size),
+                "negative_samples": int(config.negative_samples),
+                "max_training_samples": int(config.max_training_samples),
+                "weight_decay": float(config.weight_decay),
+                "parameter_count": int(model_state.parameter_count),
+                "execution_mode": str(config.execution_mode),
+                "downsample_factor": int(config.downsample_factor),
+                "patch_size": int(config.patch_size),
+                "max_disparity": int(config.max_disparity),
+                "min_disparity": int(config.min_disparity),
+                "adapter_type": "StereoTokenTransformer",
+            },
+            path,
+        )
+        return
+    if model_state.projection is not None:
+        np.savez_compressed(
+            path,
+            projection=np.asarray(model_state.projection, dtype=np.float32),
+            fold=np.asarray(int(fold), dtype=np.int32),
+            sample_count=np.asarray(int(sample_count), dtype=np.int32),
+            model_dim=np.asarray(int(config.model_dim), dtype=np.int32),
+            execution_mode=np.asarray(str(config.execution_mode)),
+            downsample_factor=np.asarray(int(config.downsample_factor), dtype=np.int32),
+            patch_size=np.asarray(int(config.patch_size), dtype=np.int32),
+        )
 
 
 def read_metrics(metrics_file: Path) -> list[MetricRow]:
@@ -407,6 +461,7 @@ def train_o4_model(
                 device=backend_status.device,
                 trained=True,
                 torch_model=torch_model,
+                parameter_count=int(getattr(torch_model, "parameter_count", 0)),
             )
 
     projection = train_o4_numpy_projection(training_descriptors, candidate_descriptors, config)
@@ -415,6 +470,7 @@ def train_o4_model(
         device="cpu",
         trained=projection is not None,
         projection=projection,
+        parameter_count=int(projection.size) if projection is not None else 0,
     )
 
 
@@ -493,6 +549,133 @@ def upsample_token_grid(token_values: Any, span: int, output_height: int, output
     return result
 
 
+def build_token_content_mask(content_mask: Any, token_span: int, token_shape: tuple[int, int]) -> Any:
+    """Project a pixel-level rectangular content mask to token centers."""
+
+    source = np.asarray(content_mask, dtype=bool)
+    token_height, token_width = int(token_shape[0]), int(token_shape[1])
+    if source.size == 0 or token_height <= 0 or token_width <= 0:
+        return np.zeros((token_height, token_width), dtype=bool)
+    rows = np.clip((np.arange(token_height) * int(token_span)) + (int(token_span) // 2), 0, source.shape[0] - 1)
+    cols = np.clip((np.arange(token_width) * int(token_span)) + (int(token_span) // 2), 0, source.shape[1] - 1)
+    return source[rows[:, None], cols[None, :]].astype(bool)
+
+
+def build_token_content_mask_torch(content_mask: Any, token_span: int, token_shape: tuple[int, int], *, device: str) -> Any:
+    import torch
+
+    return torch.as_tensor(
+        build_token_content_mask(content_mask, token_span, token_shape),
+        dtype=torch.bool,
+        device=device,
+    )
+
+
+def apply_content_mask(disparity: Any, content_mask: Any) -> Any:
+    source = np.asarray(disparity, dtype=np.float32)
+    mask = np.asarray(content_mask, dtype=bool)
+    return np.where(mask & np.isfinite(source) & (source > 0), source, 0.0).astype(np.float32)
+
+
+def token_mask_bbox(mask: Any) -> tuple[int, int, int, int] | None:
+    source = np.asarray(mask, dtype=bool)
+    locations = np.argwhere(source)
+    if locations.size == 0:
+        return None
+    top = int(locations[:, 0].min())
+    bottom = int(locations[:, 0].max() + 1)
+    left = int(locations[:, 1].min())
+    right = int(locations[:, 1].max() + 1)
+    return top, bottom, left, right
+
+
+def token_mask_bbox_torch(mask: Any) -> tuple[int, int, int, int] | None:
+    locations = mask.nonzero(as_tuple=False)
+    if int(locations.numel()) == 0:
+        return None
+    top = int(locations[:, 0].min().detach().cpu().item())
+    bottom = int(locations[:, 0].max().detach().cpu().item() + 1)
+    left = int(locations[:, 1].min().detach().cpu().item())
+    right = int(locations[:, 1].max().detach().cpu().item() + 1)
+    return top, bottom, left, right
+
+
+def stereo_cost_valid_mask_torch(reference_mask: Any, target_mask: Any, min_disparity: int, max_disparity: int, target_direction: str, *, device: str) -> Any:
+    import torch
+
+    reference = reference_mask.to(device=device, dtype=torch.bool)
+    target = target_mask.to(device=device, dtype=torch.bool)
+    height, width = reference.shape
+    disparities = list(range(int(min_disparity), int(max_disparity) + 1))
+    valid = torch.zeros((height, width, len(disparities)), dtype=torch.bool, device=device)
+    for index, disparity in enumerate(disparities):
+        if disparity == 0:
+            valid[:, :, index] = reference & target
+        elif target_direction == "positive" and disparity < width:
+            valid[:, : width - disparity, index] = reference[:, : width - disparity] & target[:, disparity:]
+        elif disparity < width:
+            valid[:, disparity:, index] = reference[:, disparity:] & target[:, : width - disparity]
+    return valid
+
+
+def stereo_cost_valid_mask(reference_mask: Any, target_mask: Any, min_disparity: int, max_disparity: int, target_direction: str) -> Any:
+    reference = np.asarray(reference_mask, dtype=bool)
+    target = np.asarray(target_mask, dtype=bool)
+    height, width = reference.shape
+    disparities = list(range(int(min_disparity), int(max_disparity) + 1))
+    valid = np.zeros((height, width, len(disparities)), dtype=bool)
+    for index, disparity in enumerate(disparities):
+        if disparity == 0:
+            valid[:, :, index] = reference & target
+        elif target_direction == "positive" and disparity < width:
+            valid[:, : width - disparity, index] = reference[:, : width - disparity] & target[:, disparity:]
+        elif disparity < width:
+            valid[:, disparity:, index] = reference[:, disparity:] & target[:, : width - disparity]
+    return valid
+
+
+def solve_content_masked_sgm_from_cost_torch(cost_volume: Any, guide_gray: Any, content_mask: Any, *, min_disparity: int, device: str) -> tuple[Any, Any]:
+    import torch
+
+    mask = content_mask.to(device=device, dtype=torch.bool)
+    bbox = token_mask_bbox_torch(mask)
+    best = torch.zeros(mask.shape, dtype=torch.float32, device=device)
+    margin = torch.zeros(mask.shape, dtype=torch.float32, device=device)
+    if bbox is None:
+        return best, margin
+    top, bottom, left, right = bbox
+    crop_best, crop_margin = solve_sgm_from_cost_torch(
+        cost_volume[top:bottom, left:right, :],
+        guide_gray[top:bottom, left:right],
+        min_disparity=int(min_disparity),
+        device=device,
+        return_numpy=False,
+    )
+    crop_mask = mask[top:bottom, left:right]
+    best[top:bottom, left:right] = crop_best.masked_fill(~crop_mask, 0.0).float()
+    margin[top:bottom, left:right] = crop_margin.masked_fill(~crop_mask, 0.0).float()
+    return best, margin
+
+
+def solve_content_masked_sgm_from_cost(cost_volume: Any, guide_gray: Any, content_mask: Any, *, min_disparity: int) -> tuple[Any, Any]:
+    mask = np.asarray(content_mask, dtype=bool)
+    bbox = token_mask_bbox(mask)
+    best = np.zeros(mask.shape, dtype=np.float32)
+    margin = np.zeros(mask.shape, dtype=np.float32)
+    if bbox is None:
+        return best, margin
+    top, bottom, left, right = bbox
+    crop_best, crop_margin = solve_sgm_from_cost(
+        np.asarray(cost_volume, dtype=np.float32)[top:bottom, left:right, :],
+        np.asarray(guide_gray, dtype=np.float32)[top:bottom, left:right],
+        min_disparity=int(min_disparity),
+    )
+    crop_mask = mask[top:bottom, left:right]
+    best[top:bottom, left:right] = np.where(crop_mask, crop_best, 0.0).astype(np.float32)
+    margin[top:bottom, left:right] = np.where(crop_mask, crop_margin, 0.0).astype(np.float32)
+    return best, margin
+
+
 def estimate_o4_working_set_mb(token_height: int, token_width: int, token_dim: int) -> float:
     """粗略估计 O4 推理时的工作集内存。"""
     token_bytes = token_height * token_width * token_dim * 4 * 2
@@ -551,8 +734,60 @@ def fill_o4_preview_by_nearest(disparity: Any) -> Any:
     if not bool(np.any(valid)):
         return np.zeros_like(source, dtype=np.float32)
     indices = ndimage.distance_transform_edt(~valid, return_distances=False, return_indices=True)
-    filled = source[tuple(indices)]
+    filled = source[tuple(np.asarray(indices, dtype=np.intp))]
     return np.where(np.isfinite(filled) & (filled > 0), filled, 0.0).astype(np.float32)
+
+
+def filter_token_speckles(disparity: Any, max_speckle_size: int, max_diff: float) -> Any:
+    """剔除 token 网格上孤立的小连通块，降低椒盐噪声。"""
+
+    source = np.asarray(disparity, dtype=np.float32).copy()
+    if max_speckle_size <= 0:
+        return source
+    valid = np.isfinite(source) & (source > 0)
+    if not bool(np.any(valid)):
+        return np.where(valid, source, 0.0).astype(np.float32)
+
+    fixed_scale = 16.0
+    fixed_disparity = np.where(valid, np.rint(source * fixed_scale), 0.0).astype(np.int16)
+    fixed_max_diff = max(1, int(round(float(max_diff) * fixed_scale)))
+    try:
+        cv2.filterSpeckles(fixed_disparity, 0, int(max_speckle_size), fixed_max_diff)
+        cleaned = fixed_disparity.astype(np.float32) / fixed_scale
+    except cv2.error:
+        cleaned = source
+        cleaned_valid = valid.copy()
+        rounded = np.where(valid, np.rint(source).astype(np.int32), -1)
+        visited = np.zeros_like(valid, dtype=bool)
+        token_height, token_width = source.shape
+        for row_index in range(token_height):
+            for column_index in range(token_width):
+                if not valid[row_index, column_index] or visited[row_index, column_index]:
+                    continue
+                seed_value = rounded[row_index, column_index]
+                stack = [(row_index, column_index)]
+                component: list[tuple[int, int]] = []
+                while stack:
+                    pixel = stack.pop()
+                    if visited[pixel]:
+                        continue
+                    visited[pixel] = True
+                    if not valid[pixel] or abs(rounded[pixel] - seed_value) > int(max_diff):
+                        continue
+                    component.append(pixel)
+                    pixel_row, pixel_col = pixel
+                    for delta_row, delta_col in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                        neighbor_row = pixel_row + delta_row
+                        neighbor_col = pixel_col + delta_col
+                        if 0 <= neighbor_row < token_height and 0 <= neighbor_col < token_width:
+                            if not visited[neighbor_row, neighbor_col]:
+                                stack.append((neighbor_row, neighbor_col))
+                if len(component) <= int(max_speckle_size):
+                    for pixel in component:
+                        cleaned_valid[pixel] = False
+        cleaned = np.where(cleaned_valid, source, 0.0).astype(np.float32)
+    cleaned = np.where(np.isfinite(cleaned) & (cleaned > 0), cleaned, 0.0).astype(np.float32)
+    return cleaned
 
 
 def guided_smooth_o4_preview(disparity: Any, guide_gray: Any) -> Any:
@@ -698,13 +933,23 @@ def run(
             config.dinov2_checkpoint_path,
         )
     else:
-        execution_status = type("O4ExecutionModeStatus", (), {
-            "requested_mode": "baseline",
-            "selected_mode": "baseline",
-            "descriptor_source": "trainable_stereo_transformer_tokens",
-            "available": True,
-            "reason": "using the trainable stereo Transformer token encoder baseline",
-        })()
+        mode_label = str(config.execution_mode).strip().lower() or "baseline"
+        if mode_label == "baseline_sgm":
+            execution_status = O4ExecutionModeStatus(
+                requested_mode="baseline_sgm",
+                selected_mode="baseline_sgm",
+                descriptor_source="trainable_stereo_transformer_tokens",
+                available=True,
+                reason="ViT token features fed into O3-style SGM aggregation",
+            )
+        else:
+            execution_status = O4ExecutionModeStatus(
+                requested_mode="baseline",
+                selected_mode="baseline",
+                descriptor_source="trainable_stereo_transformer_tokens",
+                available=True,
+                reason="using the trainable stereo Transformer token encoder baseline",
+            )
 
     if max_scenes is not None:
         if max_scenes < 0:
@@ -724,11 +969,12 @@ def run(
         f"folds={config.num_folds}, downsample_factor={config.downsample_factor}, "
         f"patch_size={config.patch_size}, backend={config.backend}, resolved_backend={backend_status.selected_backend}, "
         f"device={backend_status.device}, execution_mode={config.execution_mode}, "
-        f"descriptor_source={execution_status.descriptor_source}, model_dim={config.model_dim}, "
+        f"descriptor_source={execution_status.descriptor_source}, dinov2_input_scale={config.dinov2_input_scale}, model_dim={config.model_dim}, "
         f"encoder_hidden_dim={config.encoder_hidden_dim}, "
         f"encoder_layers={config.encoder_layers}, epochs={config.training_epochs}, "
         f"batch_size={config.training_batch_size}, max_disparity={config.max_disparity}, "
         f"min_confidence={config.min_confidence}, token_median_filter_size={config.token_median_filter_size}, "
+        f"speckle_max_size={config.speckle_max_size}, fill_invalid_passes={config.fill_invalid_passes}, "
         f"disparity_regression={config.disparity_regression}"
     )
     print(f"O4 backend status: {backend_status.reason}")
@@ -783,13 +1029,14 @@ def run(
 
         return run_dinov2_objective(repo_root, middlebury_root, config, max_scenes, dry_run=False, scene_name=scene_name)
 
+    trainable_token_modes = {"baseline", "baseline_sgm"}
     config.disparity_dir.mkdir(parents=True, exist_ok=True)
     config.analysis_dir.mkdir(parents=True, exist_ok=True)
-    use_cuda_o4 = backend_status.use_torch and backend_status.device == "cuda"
+    use_cuda_o4 = backend_status.use_torch and is_cuda_device_name(backend_status.device)
 
     payload_scene_dirs = (
         discovered_scenes
-        if execution_status.selected_mode == "baseline" and scene_name is None and max_scenes is None
+        if execution_status.selected_mode in trainable_token_modes and scene_name is None and max_scenes is None
         else scenes
     )
 
@@ -797,6 +1044,8 @@ def run(
     for scene_dir in payload_scene_dirs:
         left_gray = load_gray(scene_dir / "im0.png")
         right_gray = load_gray(scene_dir / "im1.png")
+        left_content_mask = content_mask_from_gray(left_gray)
+        right_content_mask = content_mask_from_gray(right_gray)
         if use_cuda_o4:
             downsampled_left = average_pool_gray_torch(left_gray, config.downsample_factor, device=backend_status.device)
             downsampled_right = average_pool_gray_torch(right_gray, config.downsample_factor, device=backend_status.device)
@@ -861,6 +1110,8 @@ def run(
                 "fold": scene_fold_map[scene_dir.name],
                 "left_gray": left_gray,
                 "right_gray": right_gray,
+                "left_content_mask": left_content_mask,
+                "right_content_mask": right_content_mask,
                 "left_descriptors": left_descriptors,
                 "right_descriptors": right_descriptors,
                 "execution_mode": execution_status.selected_mode,
@@ -874,7 +1125,7 @@ def run(
 
     fold_models: dict[int, O4ModelState] = {}
     fold_training_stats: dict[int, tuple[int, O4ModelState]] = {}
-    if execution_status.selected_mode == "baseline":
+    if execution_status.selected_mode in trainable_token_modes:
         for fold_index in range(config.num_folds):
             if use_cuda_o4:
                 training_descriptors, candidate_descriptors = collect_o4_training_samples_torch(
@@ -891,12 +1142,24 @@ def run(
                 config,
                 backend_status,
             )
-            fold_training_stats[fold_index] = (int(training_descriptors.shape[0]), fold_models[fold_index])
+            sample_count = int(training_descriptors.shape[0])
+            model_state = fold_models[fold_index]
+            if model_state.trained:
+                extension = ".pt" if model_state.torch_model is not None else ".npz"
+                checkpoint_path = config.metrics_file.parent / "o4_models" / f"o4_model_fold{fold_index}{extension}"
+                save_o4_model_checkpoint(checkpoint_path, model_state, config, fold=fold_index, sample_count=sample_count)
+                model_state.checkpoint_path = checkpoint_path
+                print(
+                    f"Saved O4 model fold {fold_index}: {checkpoint_path} "
+                    f"(samples={sample_count}, parameters={model_state.parameter_count})",
+                    flush=True,
+                )
+            fold_training_stats[fold_index] = (sample_count, model_state)
 
     metric_rows: list[MetricRow] = []
     for scene_dir in scenes:
         payload = next(item for item in scene_payloads if item["scene_name"] == scene_dir.name)
-        if execution_status.selected_mode == "baseline":
+        if execution_status.selected_mode in trainable_token_modes:
             model_state = fold_models[payload["fold"]]
         else:
             model_state = O4ModelState(
@@ -904,9 +1167,9 @@ def run(
                 device=backend_status.device,
                 trained=False,
             )
-        use_cuda_scene = model_state.device == "cuda"
+        use_cuda_scene = is_cuda_device_name(model_state.device)
 
-        if execution_status.selected_mode == "baseline" and model_state.torch_model is not None:
+        if execution_status.selected_mode in trainable_token_modes and model_state.torch_model is not None:
             left_tokens = encode_o4_descriptors_torch(
                 model_state.torch_model,
                 payload["left_descriptors"],
@@ -935,13 +1198,14 @@ def run(
         token_span = payload["token_span"]
         min_token_disparity = payload["min_token_disparity"]
         max_token_disparity = payload["max_token_disparity"]
-        if execution_status.selected_mode == "baseline":
+        if execution_status.selected_mode in trainable_token_modes:
             training_sample_count, training_state = fold_training_stats[payload["fold"]]
         else:
             training_sample_count = 0
             training_state = model_state
-        fallback_used = execution_status.selected_mode == "baseline" and not training_state.trained
+        fallback_used = execution_status.selected_mode in trainable_token_modes and not training_state.trained
         display_source_disparity = None
+        raw_transformer_disparity = None
 
         if fallback_used:
             fallback_downsample_factor = max(config.downsample_factor, 2)
@@ -973,6 +1237,8 @@ def run(
                     device=backend_status.device,
                     return_numpy=False,
                 )
+                fallback_confidence_mask = fallback_confidence_tokens >= float(config.min_confidence)
+                fallback_disparity_tokens = fallback_disparity_tokens.masked_fill(~fallback_confidence_mask, 0.0).float()
                 if config.token_median_filter_size > 1:
                     fallback_disparity_tokens = median_filter_2d_torch(
                         fallback_disparity_tokens.float(),
@@ -987,7 +1253,7 @@ def run(
                     device=backend_status.device,
                 ).detach().cpu().numpy().astype(np.float32)
                 confidence = upsample_token_grid_torch(
-                    fallback_confidence_tokens.masked_fill(fallback_confidence_tokens < config.min_confidence, 0.0).float(),
+                    fallback_confidence_tokens.masked_fill(~fallback_confidence_mask, 0.0).float(),
                     fallback_token_span,
                     payload["left_gray"].shape[0],
                     payload["left_gray"].shape[1],
@@ -1010,6 +1276,8 @@ def run(
                     fallback_min_token_disparity,
                     fallback_max_token_disparity,
                 )
+                fallback_confidence_mask = fallback_confidence_tokens >= float(config.min_confidence)
+                fallback_disparity_tokens = np.where(fallback_confidence_mask, fallback_disparity_tokens, 0.0).astype(np.float32)
                 if config.token_median_filter_size > 1:
                     fallback_disparity_tokens = median_filter_2d(
                         fallback_disparity_tokens.astype(np.float32),
@@ -1022,7 +1290,7 @@ def run(
                     payload["left_gray"].shape[1],
                 ).astype(np.float32)
                 confidence = upsample_token_grid(
-                    np.where(fallback_confidence_tokens >= config.min_confidence, fallback_confidence_tokens, 0.0).astype(np.float32),
+                    np.where(fallback_confidence_mask, fallback_confidence_tokens, 0.0).astype(np.float32),
                     fallback_token_span,
                     payload["left_gray"].shape[0],
                     payload["left_gray"].shape[1],
@@ -1038,7 +1306,7 @@ def run(
                     device=model_state.device,
                     return_numpy=False,
                 )
-                right_to_left_disparity, _, _ = predict_token_disparity_torch(
+                right_to_left_disparity, _, right_to_left_scores = predict_token_disparity_torch(
                     right_tokens,
                     left_tokens,
                     min_token_disparity,
@@ -1047,34 +1315,153 @@ def run(
                     target_direction="positive",
                     return_numpy=False,
                 )
-                refined_token_disparity = refine_token_disparity_torch(
+                raw_refined_token_disparity = refine_token_disparity_torch(
                     token_disparity,
                     token_scores,
                     min_token_disparity,
                     max_token_disparity,
                     device=model_state.device,
                 )
+                raw_right_to_left_disparity = refine_token_disparity_torch(
+                    right_to_left_disparity,
+                    right_to_left_scores,
+                    min_token_disparity,
+                    max_token_disparity,
+                    device=model_state.device,
+                )
                 if config.disparity_regression == "soft_argmax":
-                    refined_token_disparity = soft_argmax_disparity_torch(
+                    raw_refined_token_disparity = soft_argmax_disparity_torch(
                         token_scores,
                         min_token_disparity,
                         max_token_disparity,
                         config.softmax_temperature,
                         device=model_state.device,
                     )
+                    raw_right_to_left_disparity = soft_argmax_disparity_torch(
+                        right_to_left_scores,
+                        min_token_disparity,
+                        max_token_disparity,
+                        config.softmax_temperature,
+                        device=model_state.device,
+                    )
+                if execution_status.selected_mode == "baseline_sgm":
+                    import torch as _torch_sgm
+
+                    # Build per-token cost volumes (lower = better) from ViT cosine scores.
+                    left_cost_volume = (-token_scores).permute(1, 2, 0).contiguous().to(dtype=_torch_sgm.float32)
+                    right_cost_volume = (-right_to_left_scores).permute(1, 2, 0).contiguous().to(dtype=_torch_sgm.float32)
+                    left_token_content_mask = build_token_content_mask_torch(
+                        payload["left_content_mask"],
+                        token_span,
+                        tuple(left_cost_volume.shape[:2]),
+                        device=model_state.device,
+                    )
+                    right_token_content_mask = build_token_content_mask_torch(
+                        payload["right_content_mask"],
+                        token_span,
+                        tuple(right_cost_volume.shape[:2]),
+                        device=model_state.device,
+                    )
+                    left_pair_mask = stereo_cost_valid_mask_torch(
+                        left_token_content_mask,
+                        right_token_content_mask,
+                        min_token_disparity,
+                        max_token_disparity,
+                        "negative",
+                        device=model_state.device,
+                    )
+                    right_pair_mask = stereo_cost_valid_mask_torch(
+                        right_token_content_mask,
+                        left_token_content_mask,
+                        min_token_disparity,
+                        max_token_disparity,
+                        "positive",
+                        device=model_state.device,
+                    )
+                    left_cost_volume = left_cost_volume.masked_fill(~left_pair_mask, float("inf"))
+                    right_cost_volume = right_cost_volume.masked_fill(~right_pair_mask, float("inf"))
+
+                    # Build token-resolution guides via average pooling so SGM edge penalties
+                    # honour structure at the same scale as the cost volume.
+                    token_height = int(left_cost_volume.shape[0])
+                    token_width = int(left_cost_volume.shape[1])
+                    left_guide_tokens = average_pool_gray_torch(
+                        payload["left_gray"], token_span, device=model_state.device
+                    )[:token_height, :token_width]
+                    right_guide_tokens = average_pool_gray_torch(
+                        payload["right_gray"], token_span, device=model_state.device
+                    )[:token_height, :token_width]
+
+                    sgm_left, _ = solve_content_masked_sgm_from_cost_torch(
+                        left_cost_volume,
+                        left_guide_tokens,
+                        min_disparity=int(min_token_disparity),
+                        device=model_state.device,
+                        content_mask=left_token_content_mask,
+                    )
+                    sgm_right, _ = solve_content_masked_sgm_from_cost_torch(
+                        right_cost_volume,
+                        right_guide_tokens,
+                        min_disparity=int(min_token_disparity),
+                        device=model_state.device,
+                        content_mask=right_token_content_mask,
+                    )
+                    refined_token_disparity = sgm_left.to(dtype=_torch_sgm.float32)
+                    right_to_left_disparity = sgm_right.to(dtype=_torch_sgm.float32)
+                else:
+                    refined_token_disparity = raw_refined_token_disparity
+                    right_to_left_disparity = raw_right_to_left_disparity
+                    left_token_content_mask = build_token_content_mask_torch(
+                        payload["left_content_mask"],
+                        token_span,
+                        tuple(refined_token_disparity.shape),
+                        device=model_state.device,
+                    )
+                raw_consistency_mask = left_right_consistency_mask_torch(
+                    raw_refined_token_disparity,
+                    raw_right_to_left_disparity,
+                    config.consistency_threshold,
+                    device=model_state.device,
+                ) & left_token_content_mask
+                raw_official_token_disparity = raw_refined_token_disparity.masked_fill(~raw_consistency_mask, 0.0).float()
+                if config.token_median_filter_size > 1:
+                    raw_token_mask = raw_official_token_disparity > 0
+                    raw_filtered = median_filter_2d_torch(
+                        raw_official_token_disparity,
+                        config.token_median_filter_size,
+                        device=model_state.device,
+                    )
+                    raw_official_token_disparity = raw_filtered.masked_fill(~raw_token_mask, 0.0).float()
+                raw_transformer_disparity = upsample_token_grid_torch(
+                    raw_official_token_disparity.float() * float(token_span),
+                    token_span,
+                    payload["left_gray"].shape[0],
+                    payload["left_gray"].shape[1],
+                    device=model_state.device,
+                ).detach().cpu().numpy().astype(np.float32)
                 consistency_mask = left_right_consistency_mask_torch(
                     refined_token_disparity,
                     right_to_left_disparity,
                     config.consistency_threshold,
                     device=model_state.device,
                 )
-                confidence_tokens = token_confidence.masked_fill(token_confidence < config.min_confidence, 0.0).float()
-                official_token_disparity = refined_token_disparity.masked_fill(~consistency_mask, 0.0).float()
+                confidence_mask = token_confidence >= float(config.min_confidence)
+                confidence_tokens = token_confidence.masked_fill(~confidence_mask, 0.0).float()
+                valid_token_mask = consistency_mask & confidence_mask & left_token_content_mask
+                official_token_disparity = refined_token_disparity.masked_fill(~valid_token_mask, 0.0).float()
+                if config.speckle_max_size > 0:
+                    import torch as _torch_speckle
+                    despeckled_numpy = filter_token_speckles(
+                        official_token_disparity.detach().cpu().numpy().astype(np.float32),
+                        config.speckle_max_size,
+                        config.speckle_max_diff,
+                    )
+                    official_token_disparity = _torch_speckle.from_numpy(despeckled_numpy).to(official_token_disparity.device).float()
                 display_token_disparity = fill_invalid_disparity_torch(
                     official_token_disparity,
                     config.fill_invalid_passes,
                     device=model_state.device,
-                )
+                ).masked_fill(~left_token_content_mask, 0.0).float()
                 if config.token_median_filter_size > 1:
                     token_mask = official_token_disparity > 0
                     filtered_official = median_filter_2d_torch(
@@ -1090,6 +1477,8 @@ def run(
                         device=model_state.device,
                     )
                     display_token_disparity = filtered_display.masked_fill(~display_mask, 0.0).float()
+                official_token_disparity = official_token_disparity.masked_fill(~left_token_content_mask, 0.0).float()
+                display_token_disparity = display_token_disparity.masked_fill(~left_token_content_mask, 0.0).float()
                 disparity_tokens = official_token_disparity.float() * float(token_span)
                 disparity = upsample_token_grid_torch(
                     disparity_tokens,
@@ -1112,6 +1501,10 @@ def run(
                     payload["left_gray"].shape[1],
                     device=model_state.device,
                 ).detach().cpu().numpy().astype(np.float32)
+                raw_transformer_disparity = apply_content_mask(raw_transformer_disparity, payload["left_content_mask"])
+                disparity = apply_content_mask(disparity, payload["left_content_mask"])
+                display_source_disparity = apply_content_mask(display_source_disparity, payload["left_content_mask"])
+                confidence = np.where(np.asarray(payload["left_content_mask"], dtype=bool), confidence, 0.0).astype(np.float32)
             else:
                 if model_state.torch_model is not None:
                     token_disparity, token_confidence, token_scores = predict_token_disparity_torch(
@@ -1121,7 +1514,7 @@ def run(
                         max_token_disparity,
                         device=model_state.device,
                     )
-                    right_to_left_disparity, _, _ = predict_token_disparity_torch(
+                    right_to_left_disparity, _, right_to_left_scores = predict_token_disparity_torch(
                         right_tokens,
                         left_tokens,
                         min_token_disparity,
@@ -1136,7 +1529,7 @@ def run(
                         min_token_disparity,
                         max_token_disparity,
                     )
-                    right_to_left_disparity, _, _ = predict_token_disparity(
+                    right_to_left_disparity, _, right_to_left_scores = predict_token_disparity(
                         right_tokens,
                         left_tokens,
                         min_token_disparity,
@@ -1144,7 +1537,7 @@ def run(
                         target_direction="positive",
                     )
 
-                refined_token_disparity = regress_token_disparity(
+                raw_refined_token_disparity = regress_token_disparity(
                     token_disparity,
                     token_scores,
                     min_token_disparity,
@@ -1152,14 +1545,103 @@ def run(
                     config.disparity_regression,
                     config.softmax_temperature,
                 )
+                raw_right_to_left_disparity = regress_token_disparity(
+                    right_to_left_disparity,
+                    right_to_left_scores,
+                    min_token_disparity,
+                    max_token_disparity,
+                    config.disparity_regression,
+                    config.softmax_temperature,
+                )
+                if execution_status.selected_mode == "baseline_sgm":
+                    # NumPy / CPU path: ViT cosine scores → cost volume → O3 SGM aggregation.
+                    left_cost_volume_np = np.transpose(-np.asarray(token_scores, dtype=np.float32), (1, 2, 0)).copy()
+                    right_cost_volume_np = np.transpose(-np.asarray(right_to_left_scores, dtype=np.float32), (1, 2, 0)).copy()
+                    left_token_content_mask_np = build_token_content_mask(
+                        payload["left_content_mask"],
+                        token_span,
+                        tuple(left_cost_volume_np.shape[:2]),
+                    )
+                    right_token_content_mask_np = build_token_content_mask(
+                        payload["right_content_mask"],
+                        token_span,
+                        tuple(right_cost_volume_np.shape[:2]),
+                    )
+                    left_pair_mask_np = stereo_cost_valid_mask(
+                        left_token_content_mask_np,
+                        right_token_content_mask_np,
+                        min_token_disparity,
+                        max_token_disparity,
+                        "negative",
+                    )
+                    right_pair_mask_np = stereo_cost_valid_mask(
+                        right_token_content_mask_np,
+                        left_token_content_mask_np,
+                        min_token_disparity,
+                        max_token_disparity,
+                        "positive",
+                    )
+                    left_cost_volume_np = np.where(left_pair_mask_np, left_cost_volume_np, np.inf).astype(np.float32)
+                    right_cost_volume_np = np.where(right_pair_mask_np, right_cost_volume_np, np.inf).astype(np.float32)
+                    token_height_np = int(left_cost_volume_np.shape[0])
+                    token_width_np = int(left_cost_volume_np.shape[1])
+                    left_guide_tokens_np = average_pool_gray(payload["left_gray"], token_span)[:token_height_np, :token_width_np]
+                    right_guide_tokens_np = average_pool_gray(payload["right_gray"], token_span)[:token_height_np, :token_width_np]
+                    refined_token_disparity, _ = solve_content_masked_sgm_from_cost(
+                        left_cost_volume_np,
+                        left_guide_tokens_np,
+                        min_disparity=int(min_token_disparity),
+                        content_mask=left_token_content_mask_np,
+                    )
+                    right_to_left_disparity_sgm, _ = solve_content_masked_sgm_from_cost(
+                        right_cost_volume_np,
+                        right_guide_tokens_np,
+                        min_disparity=int(min_token_disparity),
+                        content_mask=right_token_content_mask_np,
+                    )
+                    refined_token_disparity = refined_token_disparity.astype(np.float32)
+                    right_to_left_disparity = right_to_left_disparity_sgm.astype(np.float32)
+                else:
+                    refined_token_disparity = raw_refined_token_disparity
+                    right_to_left_disparity = raw_right_to_left_disparity
+                    left_token_content_mask_np = build_token_content_mask(
+                        payload["left_content_mask"],
+                        token_span,
+                        tuple(np.asarray(refined_token_disparity).shape),
+                    )
+                raw_consistency_mask = left_right_consistency_mask(
+                    raw_refined_token_disparity,
+                    raw_right_to_left_disparity.astype(np.float32),
+                    config.consistency_threshold,
+                ) & left_token_content_mask_np
+                raw_official_token_disparity = np.where(raw_consistency_mask, raw_refined_token_disparity, 0.0).astype(np.float32)
+                if config.token_median_filter_size > 1:
+                    raw_token_mask = raw_official_token_disparity > 0
+                    raw_filtered = median_filter_2d(raw_official_token_disparity, config.token_median_filter_size)
+                    raw_official_token_disparity = np.where(raw_token_mask, raw_filtered, 0.0).astype(np.float32)
+                raw_transformer_disparity = upsample_token_grid(
+                    raw_official_token_disparity.astype(np.float32) * float(token_span),
+                    token_span,
+                    payload["left_gray"].shape[0],
+                    payload["left_gray"].shape[1],
+                ).astype(np.float32)
                 consistency_mask = left_right_consistency_mask(
                     refined_token_disparity,
                     right_to_left_disparity.astype(np.float32),
                     config.consistency_threshold,
                 )
-                confidence_tokens = np.where(token_confidence >= config.min_confidence, token_confidence, 0.0).astype(np.float32)
-                official_token_disparity = np.where(consistency_mask, refined_token_disparity, 0.0).astype(np.float32)
+                confidence_mask = token_confidence >= float(config.min_confidence)
+                confidence_tokens = np.where(confidence_mask, token_confidence, 0.0).astype(np.float32)
+                valid_token_mask = consistency_mask & confidence_mask & left_token_content_mask_np
+                official_token_disparity = np.where(valid_token_mask, refined_token_disparity, 0.0).astype(np.float32)
+                if config.speckle_max_size > 0:
+                    official_token_disparity = filter_token_speckles(
+                        official_token_disparity,
+                        config.speckle_max_size,
+                        config.speckle_max_diff,
+                    )
                 display_token_disparity = fill_invalid_disparity(official_token_disparity, config.fill_invalid_passes)
+                display_token_disparity = np.where(left_token_content_mask_np, display_token_disparity, 0.0).astype(np.float32)
                 if config.token_median_filter_size > 1:
                     token_mask = official_token_disparity > 0
                     filtered_official = median_filter_2d(official_token_disparity, config.token_median_filter_size)
@@ -1167,6 +1649,8 @@ def run(
                     display_mask = display_token_disparity > 0
                     filtered_display = median_filter_2d(display_token_disparity, config.token_median_filter_size)
                     display_token_disparity = np.where(display_mask, filtered_display, 0.0).astype(np.float32)
+                official_token_disparity = np.where(left_token_content_mask_np, official_token_disparity, 0.0).astype(np.float32)
+                display_token_disparity = np.where(left_token_content_mask_np, display_token_disparity, 0.0).astype(np.float32)
                 disparity_tokens = official_token_disparity.astype(np.float32) * float(token_span)
                 disparity = upsample_token_grid(
                     disparity_tokens,
@@ -1186,14 +1670,23 @@ def run(
                     payload["left_gray"].shape[0],
                     payload["left_gray"].shape[1],
                 ).astype(np.float32)
+                raw_transformer_disparity = apply_content_mask(raw_transformer_disparity, payload["left_content_mask"])
+                disparity = apply_content_mask(disparity, payload["left_content_mask"])
+                display_source_disparity = apply_content_mask(display_source_disparity, payload["left_content_mask"])
+                confidence = np.where(np.asarray(payload["left_content_mask"], dtype=bool), confidence, 0.0).astype(np.float32)
 
-        raw_transformer_disparity = np.where(np.isfinite(disparity) & (disparity > 0), disparity, 0.0).astype(np.float32)
+        if raw_transformer_disparity is None:
+            raw_transformer_disparity = np.where(np.isfinite(disparity) & (disparity > 0), disparity, 0.0).astype(np.float32)
+        raw_transformer_disparity = apply_content_mask(raw_transformer_disparity, payload["left_content_mask"])
         disparity = display_source_disparity if display_source_disparity is not None else raw_transformer_disparity
+        disparity = apply_content_mask(disparity, payload["left_content_mask"])
         disparity = np.where(np.isfinite(disparity) & (disparity > 0), disparity, 0.0).astype(np.float32)
         reliable_confidence_floor = float(config.min_confidence)
         reliable_pixel_count = int(np.count_nonzero(disparity > 0))
         display_disparity = build_o4_preview_disparity(disparity, payload["left_gray"])
+        display_disparity = apply_content_mask(display_disparity, payload["left_content_mask"])
         display_confidence = build_o4_display_confidence(confidence, display_disparity)
+        display_confidence = np.where(np.asarray(payload["left_content_mask"], dtype=bool), display_confidence, 0.0).astype(np.float32)
 
         disparity_scene_dir = config.disparity_dir / scene_dir.name
         analysis_scene_dir = config.analysis_dir / scene_dir.name
@@ -1209,9 +1702,9 @@ def run(
 
         write_pfm(disparity_scene_dir / "disp0.pfm", disparity)
         write_pfm(disparity_scene_dir / "disp0_transformer_raw.pfm", raw_transformer_disparity)
-        raw_disparity_preview = normalize_for_preview(raw_transformer_disparity, raw_transformer_disparity > 0)
+        raw_disparity_preview = colorize_disparity_depth_map(raw_transformer_disparity, raw_transformer_disparity > 0)
         write_png(disparity_scene_dir / "disp0_transformer_raw.png", raw_disparity_preview)
-        disparity_preview = normalize_for_preview(display_disparity, display_disparity > 0)
+        disparity_preview = colorize_disparity_depth_map(display_disparity, display_disparity > 0)
         write_png(disparity_scene_dir / "disp0.png", disparity_preview)
         write_scene_text(
             disparity_scene_dir / "README.txt",
@@ -1236,14 +1729,20 @@ def run(
                 f"model_dim: {config.model_dim}",
                 f"encoder_hidden_dim: {config.encoder_hidden_dim}",
                 f"encoder_layers: {config.encoder_layers}",
+                f"trainable_parameters: {training_state.parameter_count}",
                 f"training_epochs: {config.training_epochs}",
                 f"training_batch_size: {config.training_batch_size}",
                 f"training_samples: {training_sample_count}",
                 f"trained_projection: {'yes' if training_state.trained else 'no'}",
+                f"o4_model_checkpoint: {training_state.checkpoint_path if training_state.checkpoint_path is not None else 'none'}",
                 f"fallback_coarse_matcher_used: {'yes' if fallback_used else 'no'}",
+                "content_mask_applied: yes",
                 f"official_pfm_confidence_floor: {reliable_confidence_floor:.6f}",
                 f"official_pfm_reliable_pixels: {reliable_pixel_count}",
                 f"token_median_filter_size: {config.token_median_filter_size}",
+                f"speckle_max_size: {config.speckle_max_size}",
+                f"speckle_max_diff: {config.speckle_max_diff:.6f}",
+                f"fill_invalid_passes: {config.fill_invalid_passes}",
                 f"estimated_working_set_mb: {estimated_working_set_mb:.3f}",
             ],
         )

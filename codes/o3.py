@@ -724,71 +724,6 @@ def filter_speckles(disparity: Any, window_size: int, disparity_range: int) -> A
     return filtered.astype(np.float32)
 
 
-def compute_numpy_block_disparity(left_gray: Any, right_gray: Any, config: O3Config) -> Any:
-    """使用纯 numpy 代价体与后处理得到稠密视差。"""
-
-    left = np.asarray(left_gray, dtype=np.float32)
-    right = np.asarray(right_gray, dtype=np.float32)
-    left_gradient = compute_horizontal_gradient(left)
-    right_gradient = compute_horizontal_gradient(right)
-    left_census = compute_census_transform(left, config.census_window_size)
-    right_census = compute_census_transform(right, config.census_window_size)
-    left_disparity, left_cost, left_second_cost = compute_matching_minima(
-        left,
-        right,
-        left_gradient,
-        right_gradient,
-        left_census,
-        right_census,
-        config,
-    )
-    right_disparity, _, _ = compute_matching_minima(
-        right,
-        left,
-        right_gradient,
-        left_gradient,
-        right_census,
-        left_census,
-        config,
-        target_direction="positive",
-    )
-
-    if config.uniqueness_ratio > 0:
-        uniqueness_margin = left_second_cost - left_cost
-        uniqueness_floor = np.maximum(1e-3, left_cost * (float(config.uniqueness_ratio) / 100.0))
-        left_disparity = np.where(uniqueness_margin >= uniqueness_floor, left_disparity, 0.0)
-
-    left_disparity = refine_subpixel_disparity(
-        left,
-        right,
-        left_gradient,
-        right_gradient,
-        left_census,
-        right_census,
-        left_disparity,
-        config,
-    )
-    consistency_limit = max(float(config.consistency_threshold), float(config.disp12_max_diff))
-    consistent_mask = left_right_consistency_mask(left_disparity, right_disparity, consistency_limit)
-    disparity = np.where(consistent_mask, left_disparity, 0.0).astype(np.float32)
-
-    invalid_margin = max(config.block_size // 2, config.census_window_size // 2)
-    if invalid_margin > 0:
-        disparity[:invalid_margin, :] = 0.0
-        disparity[-invalid_margin:, :] = 0.0
-        disparity[:, :invalid_margin] = 0.0
-        disparity[:, -invalid_margin:] = 0.0
-
-    disparity = filter_speckles(disparity, config.speckle_window_size, config.speckle_range)
-    disparity = fill_invalid_disparity(disparity, config.fill_invalid_passes)
-    if config.median_filter_size > 1:
-        positive_mask = disparity > 0
-        filtered = median_filter_2d(disparity, config.median_filter_size)
-        disparity = np.where(positive_mask, filtered, 0.0).astype(np.float32)
-
-    return disparity.astype(np.float32)
-
-
 def joint_weighted_median_filter_disparity(
     disparity: Any,
     guide_gray: Any,
@@ -1239,28 +1174,39 @@ def aggregate_sgm_axis_torch(cost_volume: Any, guide_gray: Any, axis: int, rever
     return aggregated
 
 
-def solve_sgm_direction_torch(
+def solve_sgm_from_cost_torch(
+    cost_volume: Any,
     reference_gray: Any,
-    target_gray: Any,
-    config: O3Config,
-    target_direction: str,
+    *,
     min_disparity: int,
-    max_disparity: int | None,
     device: str,
+    p1: float | None = None,
+    p2: float | None = None,
+    return_numpy: bool = True,
 ) -> tuple[Any, Any]:
+    """对外暴露的 SGM 聚合：接受任意像素/网格级代价体并返回亚像素视差。
+
+    输入 ``cost_volume`` 形状 ``[H, W, D]``（值越小越匹配），
+    ``reference_gray`` 形状 ``[H, W]`` 用于边缘自适应惩罚。
+    返回 ``(best, margin)``：均为形状 ``[H, W]`` 的 float32。
+    """
+
+    if torch is None:
+        raise RuntimeError("solve_sgm_from_cost_torch requires PyTorch.")
     with torch.no_grad():
-        raw_cost = build_matching_cost_volume_torch(
-            reference_gray,
-            target_gray,
-            config,
-            target_direction=target_direction,
-            min_disparity=min_disparity,
-            max_disparity=max_disparity,
-            device=device,
-        )
-        cost = normalize_cost_volume_torch(raw_cost)
-        p1, p2 = estimate_sgm_penalties_torch(cost)
-        reference = torch.as_tensor(np.asarray(reference_gray, dtype=np.float32), dtype=torch.float32, device=device)
+        if isinstance(cost_volume, torch.Tensor):
+            cost_tensor = cost_volume.to(device=device, dtype=torch.float32)
+        else:
+            cost_tensor = torch.as_tensor(np.asarray(cost_volume, dtype=np.float32), dtype=torch.float32, device=device)
+        cost = normalize_cost_volume_torch(cost_tensor)
+        if p1 is None or p2 is None:
+            est_p1, est_p2 = estimate_sgm_penalties_torch(cost)
+            p1 = float(est_p1) if p1 is None else float(p1)
+            p2 = float(est_p2) if p2 is None else float(p2)
+        if isinstance(reference_gray, torch.Tensor):
+            reference = reference_gray.to(device=device, dtype=torch.float32)
+        else:
+            reference = torch.as_tensor(np.asarray(reference_gray, dtype=np.float32), dtype=torch.float32, device=device)
         aggregated = cost.clone()
         aggregated = aggregated + aggregate_sgm_axis_torch(cost, reference, axis=1, reverse=False, p1=p1, p2=p2)
         aggregated = aggregated + aggregate_sgm_axis_torch(cost, reference, axis=1, reverse=True, p1=p1, p2=p2)
@@ -1286,7 +1232,37 @@ def solve_sgm_direction_torch(
             best = best + torch.clamp(offset, -0.5, 0.5)
         else:
             margin = torch.zeros_like(best)
-        return best.detach().cpu().numpy().astype(np.float32), margin.detach().cpu().numpy().astype(np.float32)
+        if return_numpy:
+            return best.detach().cpu().numpy().astype(np.float32), margin.detach().cpu().numpy().astype(np.float32)
+        return best.to(dtype=torch.float32), margin.to(dtype=torch.float32)
+
+
+def solve_sgm_direction_torch(
+    reference_gray: Any,
+    target_gray: Any,
+    config: O3Config,
+    target_direction: str,
+    min_disparity: int,
+    max_disparity: int | None,
+    device: str,
+) -> tuple[Any, Any]:
+    with torch.no_grad():
+        raw_cost = build_matching_cost_volume_torch(
+            reference_gray,
+            target_gray,
+            config,
+            target_direction=target_direction,
+            min_disparity=min_disparity,
+            max_disparity=max_disparity,
+            device=device,
+        )
+        return solve_sgm_from_cost_torch(
+            raw_cost,
+            reference_gray,
+            min_disparity=min_disparity,
+            device=device,
+            return_numpy=True,
+        )
 
 
 def aggregate_sgm_axis(cost_volume: Any, guide_gray: Any, axis: int, reverse: bool, p1: float, p2: float) -> Any:
@@ -1382,8 +1358,24 @@ def solve_sgm_direction(
         min_disparity=min_disparity,
         max_disparity=max_disparity,
     )
-    cost = normalize_cost_volume(raw_cost)
-    p1, p2 = estimate_sgm_penalties(cost)
+    return solve_sgm_from_cost(raw_cost, reference_gray, min_disparity=min_disparity)
+
+
+def solve_sgm_from_cost(
+    cost_volume: Any,
+    reference_gray: Any,
+    *,
+    min_disparity: int,
+    p1: float | None = None,
+    p2: float | None = None,
+) -> tuple[Any, Any]:
+    """对外暴露的 NumPy 版 SGM 聚合：接受任意代价体并返回亚像素视差。"""
+
+    cost = normalize_cost_volume(np.asarray(cost_volume, dtype=np.float32))
+    if p1 is None or p2 is None:
+        est_p1, est_p2 = estimate_sgm_penalties(cost)
+        p1 = float(est_p1) if p1 is None else float(p1)
+        p2 = float(est_p2) if p2 is None else float(p2)
     reference = np.asarray(reference_gray, dtype=np.float32)
     aggregated = cost.copy()
     aggregated += aggregate_sgm_axis(cost, reference, axis=1, reverse=False, p1=p1, p2=p2)
@@ -2035,20 +2027,6 @@ def average_pool_gray(image: Any, factor: int) -> Any:
     trimmed = image[: pooled_height * factor, : pooled_width * factor].astype(np.float32)
     pooled = trimmed.reshape(pooled_height, factor, pooled_width, factor).mean(axis=(1, 3))
     return np.rint(pooled).astype(np.uint8)
-
-
-def average_pool_2d(image: Any, factor: int) -> Any:
-    """对二维浮点图做平均池化降采样。"""
-
-    source = np.asarray(image, dtype=np.float32)
-    if factor <= 1:
-        return source
-
-    height, width = source.shape[:2]
-    pooled_height = max(1, height // factor)
-    pooled_width = max(1, width // factor)
-    trimmed = source[: pooled_height * factor, : pooled_width * factor]
-    return trimmed.reshape(pooled_height, factor, pooled_width, factor).mean(axis=(1, 3)).astype(np.float32)
 
 
 def validate_results(disparity_dir: Path, analysis_dir: Path, metrics_file: Path, scene_name: str | None = None) -> int:

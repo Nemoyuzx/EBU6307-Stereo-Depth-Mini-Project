@@ -21,6 +21,7 @@ from o4_dinov2 import (
     _extract_patch_tokens,
     _load_dinov2_model,
     _resolve_dinov2_model_spec,
+    _select_dinov2_tile_shape,
     resolve_dinov2_checkpoint_path,
     resolve_dinov2_repo_path,
     resolve_o4_execution_mode,
@@ -132,6 +133,13 @@ class ResolveO4ExecutionModeTests(unittest.TestCase):
 
 
 class ExtractPatchTokensTests(unittest.TestCase):
+    def test_large_wide_token_grid_uses_balanced_tiles(self) -> None:
+        tile_height, tile_width = _select_dinov2_tile_shape(540, 960)
+
+        self.assertLessEqual(tile_height * tile_width, 4096)
+        self.assertGreaterEqual(tile_height, 40)
+        self.assertGreaterEqual(tile_width, 40)
+
     def test_drops_prefix_tokens_from_last_hidden_state(self) -> None:
         tokens = np.arange(1 * 6 * 3, dtype=np.float32).reshape(1, 6, 3)
 

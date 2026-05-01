@@ -8,6 +8,19 @@ from pathlib import Path
 import sys
 from typing import Any
 
+import numpy as np
+
+from common import content_mask_from_gray, discover_scenes, evaluate_disparity, filter_scene_dirs, load_gray, normalize_for_preview, write_png, write_scene_text
+from o3 import colorize_disparity_depth_map, solve_sgm_from_cost_torch
+from o4_torch import (
+    build_token_ground_truth_torch,
+    cuda_device_index,
+    encode_o4_descriptors_torch,
+    is_cuda_device_name,
+    train_o4_torch_model,
+)
+from pfm import read_pfm, write_pfm
+
 
 _MODEL_CACHE: dict[tuple[str, str, str, str], tuple[Any, int]] = {}
 _ACTIVE_DINOV2_IMPORT_ROOT: str | None = None
@@ -420,6 +433,7 @@ def extract_dinov2_patch_tokens(
     image: Any,
     *,
     downsample_factor: int,
+    input_scale: int,
     model_name: str,
     repo_path: str | Path | None,
     checkpoint_path: str | Path,
@@ -431,6 +445,14 @@ def extract_dinov2_patch_tokens(
 
     model, patch_size = _load_dinov2_model(model_name, checkpoint_path, device, repo_path=repo_path)
     source = _prepare_downsampled_gray(image, downsample_factor, device)
+    scale = max(1, int(input_scale))
+    if scale > 1:
+        source = F.interpolate(
+            source.unsqueeze(0).unsqueeze(0),
+            scale_factor=float(scale),
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(0).squeeze(0)
     height, width = source.shape
     token_height = height // patch_size
     token_width = width // patch_size
@@ -480,25 +502,23 @@ def extract_dinov2_patch_tokens(
     return descriptors, cropped_height, cropped_width, patch_size
 
 
-def extract_dinov2_descriptors(*args: Any, **kwargs: Any) -> tuple[Any, int, int, int]:
-    return extract_dinov2_patch_tokens(*args, **kwargs)
-
-
 def _select_dinov2_tile_shape(token_height: int, token_width: int) -> tuple[int, int]:
     token_limit = max(1, int(_DINO_V2_TILE_TOKEN_LIMIT))
-    if int(token_height) * int(token_width) <= token_limit:
-        return int(token_height), int(token_width)
-    if token_height <= token_width and token_height <= token_limit:
-        tile_height = int(token_height)
-        tile_width = max(1, min(int(token_width), token_limit // tile_height))
-        return tile_height, tile_width
-    if token_width <= token_limit:
-        tile_width = int(token_width)
-        tile_height = max(1, min(int(token_height), token_limit // tile_width))
-        return tile_height, tile_width
+    height = max(1, int(token_height))
+    width = max(1, int(token_width))
+    if height * width <= token_limit:
+        return height, width
     side = max(1, int(token_limit ** 0.5))
-    tile_height = min(int(token_height), side)
-    tile_width = max(1, min(int(token_width), token_limit // tile_height))
+    aspect = width / float(height)
+    tile_height = max(1, min(height, int(round(side / max(aspect ** 0.5, 1e-6)))))
+    tile_width = max(1, min(width, token_limit // tile_height))
+    while tile_height * tile_width > token_limit:
+        if tile_width >= tile_height and tile_width > 1:
+            tile_width -= 1
+        elif tile_height > 1:
+            tile_height -= 1
+        else:
+            break
     return tile_height, tile_width
 
 
@@ -531,12 +551,16 @@ def _predict_token_disparity_torch(
     *,
     device: str,
     target_direction: str = "negative",
+    reference_valid_mask: Any | None = None,
+    target_valid_mask: Any | None = None,
 ) -> tuple[Any, Any, Any]:
     torch = _require_torch()
 
     left = _as_float_tensor(left_tokens, device)
     right = _as_float_tensor(right_tokens, device)
     token_height, token_width, _ = left.shape
+    reference_valid = None if reference_valid_mask is None else reference_valid_mask.to(device=device, dtype=torch.bool)
+    target_valid = None if target_valid_mask is None else target_valid_mask.to(device=device, dtype=torch.bool)
     best_scores = torch.full((token_height, token_width), -torch.inf, dtype=torch.float32, device=device)
     second_scores = torch.full((token_height, token_width), -torch.inf, dtype=torch.float32, device=device)
     best_disparities = torch.zeros((token_height, token_width), dtype=torch.int32, device=device)
@@ -551,14 +575,24 @@ def _predict_token_disparity_torch(
         current_scores = torch.full((token_height, token_width), -torch.inf, dtype=torch.float32, device=device)
         if disparity == 0:
             current_scores = (left * right).sum(dim=2)
+            if reference_valid is not None and target_valid is not None:
+                current_scores = current_scores.masked_fill(~(reference_valid & target_valid), -torch.inf)
         elif target_direction == "positive" and disparity < token_width:
-            current_scores[:, : token_width - disparity] = (
+            shifted_scores = (
                 left[:, : token_width - disparity, :] * right[:, disparity:, :]
             ).sum(dim=2)
+            if reference_valid is not None and target_valid is not None:
+                shifted_valid = reference_valid[:, : token_width - disparity] & target_valid[:, disparity:]
+                shifted_scores = shifted_scores.masked_fill(~shifted_valid, -torch.inf)
+            current_scores[:, : token_width - disparity] = shifted_scores
         elif disparity < token_width:
-            current_scores[:, disparity:] = (
+            shifted_scores = (
                 left[:, disparity:, :] * right[:, : token_width - disparity, :]
             ).sum(dim=2)
+            if reference_valid is not None and target_valid is not None:
+                shifted_valid = reference_valid[:, disparity:] & target_valid[:, : token_width - disparity]
+                shifted_scores = shifted_scores.masked_fill(~shifted_valid, -torch.inf)
+            current_scores[:, disparity:] = shifted_scores
 
         all_scores[score_index] = current_scores
         replace_mask = current_scores > best_scores
@@ -671,6 +705,344 @@ def _upsample_token_grid_torch(token_values: Any, span: int, output_height: int,
     return result.float()
 
 
+def _build_token_content_mask_torch(content_mask: Any, token_span: int, token_shape: tuple[int, int], *, device: str) -> Any:
+    torch = _require_torch()
+    import numpy as np
+
+    source = np.asarray(content_mask, dtype=bool)
+    token_height, token_width = int(token_shape[0]), int(token_shape[1])
+    if source.size == 0 or token_height <= 0 or token_width <= 0:
+        return torch.zeros((token_height, token_width), dtype=torch.bool, device=device)
+    rows = np.clip((np.arange(token_height) * int(token_span)) + (int(token_span) // 2), 0, source.shape[0] - 1)
+    cols = np.clip((np.arange(token_width) * int(token_span)) + (int(token_span) // 2), 0, source.shape[1] - 1)
+    return torch.as_tensor(source[rows[:, None], cols[None, :]], dtype=torch.bool, device=device)
+
+
+def _stereo_cost_valid_mask_torch(reference_mask: Any, target_mask: Any, min_disparity: int, max_disparity: int, target_direction: str, *, device: str) -> Any:
+    torch = _require_torch()
+
+    reference = reference_mask.to(device=device, dtype=torch.bool)
+    target = target_mask.to(device=device, dtype=torch.bool)
+    height, width = reference.shape
+    disparities = list(range(int(min_disparity), int(max_disparity) + 1))
+    valid = torch.zeros((height, width, len(disparities)), dtype=torch.bool, device=device)
+    for index, disparity in enumerate(disparities):
+        if disparity == 0:
+            valid[:, :, index] = reference & target
+        elif target_direction == "positive" and disparity < width:
+            valid[:, : width - disparity, index] = reference[:, : width - disparity] & target[:, disparity:]
+        elif disparity < width:
+            valid[:, disparity:, index] = reference[:, disparity:] & target[:, : width - disparity]
+    return valid
+
+
+def _token_mask_bbox_torch(mask: Any) -> tuple[int, int, int, int] | None:
+    locations = mask.nonzero(as_tuple=False)
+    if int(locations.numel()) == 0:
+        return None
+    top = int(locations[:, 0].min().detach().cpu().item())
+    bottom = int(locations[:, 0].max().detach().cpu().item() + 1)
+    left = int(locations[:, 1].min().detach().cpu().item())
+    right = int(locations[:, 1].max().detach().cpu().item() + 1)
+    return top, bottom, left, right
+
+
+def _solve_content_masked_sgm_from_cost_torch(cost_volume: Any, guide_gray: Any, content_mask: Any, *, min_disparity: int, device: str) -> tuple[Any, Any]:
+    torch = _require_torch()
+
+    mask = content_mask.to(device=device, dtype=torch.bool)
+    bbox = _token_mask_bbox_torch(mask)
+    best = torch.zeros(mask.shape, dtype=torch.float32, device=device)
+    margin = torch.zeros(mask.shape, dtype=torch.float32, device=device)
+    if bbox is None:
+        return best, margin
+    top, bottom, left, right = bbox
+    crop_best, crop_margin = solve_sgm_from_cost_torch(
+        cost_volume[top:bottom, left:right, :],
+        guide_gray[top:bottom, left:right],
+        min_disparity=int(min_disparity),
+        device=device,
+        return_numpy=False,
+    )
+    crop_mask = mask[top:bottom, left:right]
+    best[top:bottom, left:right] = crop_best.masked_fill(~crop_mask, 0.0).float()
+    margin[top:bottom, left:right] = crop_margin.masked_fill(~crop_mask, 0.0).float()
+    return best, margin
+
+
+def _build_token_guide_torch(image: Any, downsample_factor: int, input_scale: int, patch_size: int, token_shape: tuple[int, int], *, device: str) -> Any:
+    import torch.nn.functional as F
+
+    source = _prepare_downsampled_gray(image, downsample_factor, device) * 255.0
+    scale = max(1, int(input_scale))
+    if scale > 1:
+        source = F.interpolate(
+            source.unsqueeze(0).unsqueeze(0),
+            scale_factor=float(scale),
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(0).squeeze(0)
+    token_height, token_width = int(token_shape[0]), int(token_shape[1])
+    cropped = source[: token_height * int(patch_size), : token_width * int(patch_size)].contiguous()
+    if cropped.numel() == 0:
+        return source.new_zeros((token_height, token_width), dtype=source.dtype)
+    guide = cropped.reshape(token_height, int(patch_size), token_width, int(patch_size))
+    return guide.permute(0, 2, 1, 3).mean(dim=(2, 3)).to(dtype=source.dtype)
+
+
+def _apply_content_mask(disparity: Any, content_mask: Any) -> Any:
+    import numpy as np
+
+    source = np.asarray(disparity, dtype=np.float32)
+    mask = np.asarray(content_mask, dtype=bool)
+    return np.where(mask & np.isfinite(source) & (source > 0), source, 0.0).astype(np.float32)
+
+
+def _sample_dinov2_training_pairs(
+    left_tokens: Any,
+    right_tokens: Any,
+    labels: Any,
+    *,
+    min_disparity: int,
+    max_disparity: int,
+    sample_limit: int,
+    negative_samples: int,
+    generator: Any,
+    device: str,
+) -> tuple[Any, Any]:
+    torch = _require_torch()
+
+    limit = max(0, int(sample_limit))
+    negatives_count = max(1, int(negative_samples))
+    feature_dim = int(left_tokens.shape[2])
+    if limit <= 0:
+        return (
+            torch.zeros((0, feature_dim), dtype=torch.float32, device=device),
+            torch.zeros((0, negatives_count + 1, feature_dim), dtype=torch.float32, device=device),
+        )
+
+    valid_locations = torch.nonzero((labels >= int(min_disparity)) & (labels <= int(max_disparity)), as_tuple=False)
+    if int(valid_locations.numel()) == 0:
+        return (
+            torch.zeros((0, feature_dim), dtype=torch.float32, device=device),
+            torch.zeros((0, negatives_count + 1, feature_dim), dtype=torch.float32, device=device),
+        )
+    order = torch.randperm(valid_locations.shape[0], generator=generator, device=device)
+    valid_locations = valid_locations.index_select(0, order)
+
+    rows = valid_locations[:, 0].to(dtype=torch.int64)
+    cols = valid_locations[:, 1].to(dtype=torch.int64)
+    disparities = labels[rows, cols].to(dtype=torch.int64)
+    match_columns = cols - disparities
+    sample_mask = (
+        (match_columns >= 0)
+        & (match_columns < int(right_tokens.shape[1]))
+        & (disparities >= int(min_disparity))
+        & (disparities <= int(max_disparity))
+    )
+    rows = rows[sample_mask][:limit]
+    cols = cols[sample_mask][:limit]
+    disparities = disparities[sample_mask][:limit]
+    sample_count = int(rows.shape[0])
+    if sample_count == 0:
+        return (
+            torch.zeros((0, feature_dim), dtype=torch.float32, device=device),
+            torch.zeros((0, negatives_count + 1, feature_dim), dtype=torch.float32, device=device),
+        )
+
+    hard_count = min(negatives_count, 6)
+    hard_offsets = torch.tensor((1, -1, 2, -2, 3, -3), dtype=torch.int64, device=device)[:hard_count]
+    hard_negatives = disparities[:, None] + hard_offsets[None, :]
+    random_count = negatives_count - hard_count
+    if random_count > 0:
+        random_negatives = torch.randint(
+            int(min_disparity),
+            int(max_disparity) + 1,
+            (sample_count, random_count),
+            generator=generator,
+            device=device,
+            dtype=torch.int64,
+        )
+        negatives = torch.cat([hard_negatives, random_negatives], dim=1)
+    else:
+        negatives = hard_negatives
+
+    valid_negative = (
+        (negatives != disparities[:, None])
+        & ((cols[:, None] - negatives) >= 0)
+        & ((cols[:, None] - negatives) < int(right_tokens.shape[1]))
+    )
+    retry_count = 0
+    while not bool(valid_negative.all()) and retry_count < 32:
+        replacement = torch.randint(
+            int(min_disparity),
+            int(max_disparity) + 1,
+            negatives.shape,
+            generator=generator,
+            device=device,
+            dtype=torch.int64,
+        )
+        negatives = torch.where(valid_negative, negatives, replacement)
+        valid_negative = (
+            (negatives != disparities[:, None])
+            & ((cols[:, None] - negatives) >= 0)
+            & ((cols[:, None] - negatives) < int(right_tokens.shape[1]))
+        )
+        retry_count += 1
+    if not bool(valid_negative.all()):
+        negatives = torch.clamp(negatives, min=int(min_disparity), max=int(max_disparity))
+        safe_columns = torch.clamp(cols[:, None] - negatives, min=0, max=int(right_tokens.shape[1]) - 1)
+    else:
+        safe_columns = cols[:, None] - negatives
+
+    candidate_columns = torch.cat([(cols - disparities)[:, None], safe_columns], dim=1)
+    left_samples = left_tokens[rows, cols].to(dtype=torch.float32)
+    candidate_samples = right_tokens[rows[:, None], candidate_columns].to(dtype=torch.float32)
+    return left_samples, candidate_samples
+
+
+def _collect_dinov2_training_samples_by_fold(
+    scene_dirs: list[Path],
+    scene_fold_map: dict[str, int],
+    config: Any,
+    *,
+    device: str,
+) -> dict[int, tuple[Any, Any, int]]:
+    torch = _require_torch()
+
+    fold_count = max(1, int(config.num_folds))
+    max_samples = max(1, int(config.max_training_samples))
+    training_counts = {
+        fold: max(1, sum(1 for scene_dir in scene_dirs if scene_fold_map[scene_dir.name] != fold))
+        for fold in range(fold_count)
+    }
+    per_fold_scene_limit = {
+        fold: max(1, int(np.ceil(max_samples / float(training_counts[fold]))))
+        for fold in range(fold_count)
+    }
+    remaining = {fold: max_samples for fold in range(fold_count)}
+    left_batches: dict[int, list[Any]] = {fold: [] for fold in range(fold_count)}
+    candidate_batches: dict[int, list[Any]] = {fold: [] for fold in range(fold_count)}
+    generators = {fold: torch.Generator(device=device).manual_seed(int(config.random_seed) + fold) for fold in range(fold_count)}
+
+    for scene_index, scene_dir in enumerate(scene_dirs, start=1):
+        ground_truth_path = scene_dir / "disp0.pfm"
+        if not ground_truth_path.exists():
+            continue
+        left_gray = load_gray(scene_dir / "im0.png")
+        right_gray = load_gray(scene_dir / "im1.png")
+        left_tokens, _, _, model_patch_size = extract_dinov2_patch_tokens(
+            left_gray,
+            downsample_factor=config.downsample_factor,
+            input_scale=config.dinov2_input_scale,
+            model_name=config.dinov2_model_name,
+            repo_path=config.dinov2_repo_path,
+            checkpoint_path=config.dinov2_checkpoint_path,
+            device=device,
+            return_numpy=False,
+        )
+        right_tokens, _, _, _ = extract_dinov2_patch_tokens(
+            right_gray,
+            downsample_factor=config.downsample_factor,
+            input_scale=config.dinov2_input_scale,
+            model_name=config.dinov2_model_name,
+            repo_path=config.dinov2_repo_path,
+            checkpoint_path=config.dinov2_checkpoint_path,
+            device=device,
+            return_numpy=False,
+        )
+        token_span = max(1, int(round((float(config.downsample_factor) * float(model_patch_size)) / float(max(1, int(config.dinov2_input_scale))))))
+        max_token_disparity = min(
+            max(int(config.min_disparity), int(config.max_disparity) // token_span),
+            max(0, int(left_tokens.shape[1]) - 1),
+        )
+        min_token_disparity = min(int(config.min_disparity) // token_span, max_token_disparity)
+        ground_truth = read_pfm(ground_truth_path)
+        if getattr(ground_truth, "ndim", 0) == 3:
+            ground_truth = ground_truth[:, :, 0]
+        labels = build_token_ground_truth_torch(
+            ground_truth,
+            token_span,
+            tuple(left_tokens.shape[:2]),
+            device=device,
+        )
+        scene_fold = int(scene_fold_map[scene_dir.name])
+        for fold in range(fold_count):
+            if fold == scene_fold or remaining[fold] <= 0:
+                continue
+            sample_limit = min(remaining[fold], per_fold_scene_limit[fold])
+            left_samples, candidate_samples = _sample_dinov2_training_pairs(
+                left_tokens,
+                right_tokens,
+                labels,
+                min_disparity=min_token_disparity,
+                max_disparity=max_token_disparity,
+                sample_limit=sample_limit,
+                negative_samples=config.negative_samples,
+                generator=generators[fold],
+                device=device,
+            )
+            if int(left_samples.shape[0]) == 0:
+                continue
+            left_batches[fold].append(left_samples.detach().cpu())
+            candidate_batches[fold].append(candidate_samples.detach().cpu())
+            remaining[fold] -= int(left_samples.shape[0])
+        print(
+            f"Collected DINOv2 adapter samples from {scene_dir.name} ({scene_index}/{len(scene_dirs)}); "
+            + ", ".join(f"fold{fold}={max_samples - remaining[fold]}" for fold in range(fold_count)),
+            flush=True,
+        )
+        del left_tokens, right_tokens, labels
+        if is_cuda_device_name(device):
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+    result: dict[int, tuple[Any, Any, int]] = {}
+    for fold in range(fold_count):
+        if left_batches[fold]:
+            left_tensor = torch.cat(left_batches[fold], dim=0)
+            candidate_tensor = torch.cat(candidate_batches[fold], dim=0)
+            result[fold] = (left_tensor, candidate_tensor, int(left_tensor.shape[0]))
+        else:
+            feature_dim = 768
+            result[fold] = (
+                torch.zeros((0, feature_dim), dtype=torch.float32),
+                torch.zeros((0, int(config.negative_samples) + 1, feature_dim), dtype=torch.float32),
+                0,
+            )
+    return result
+
+
+def _save_dinov2_adapter_checkpoint(path: Path, model: Any, config: Any, *, fold: int, sample_count: int) -> None:
+    torch = _require_torch()
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "state_dict": model.state_dict(),
+            "fold": int(fold),
+            "sample_count": int(sample_count),
+            "input_dim": int(getattr(model, "input_dim", 0)),
+            "model_dim": int(config.model_dim),
+            "encoder_hidden_dim": int(config.encoder_hidden_dim),
+            "encoder_layers": int(config.encoder_layers),
+            "training_epochs": int(config.training_epochs),
+            "training_learning_rate": float(config.training_learning_rate),
+            "negative_samples": int(config.negative_samples),
+            "max_training_samples": int(config.max_training_samples),
+            "parameter_count": int(getattr(model, "parameter_count", 0)),
+            "dinov2_model_name": str(config.dinov2_model_name),
+            "dinov2_checkpoint_path": str(config.dinov2_checkpoint_path),
+            "dinov2_input_scale": int(config.dinov2_input_scale),
+            "downsample_factor": int(config.downsample_factor),
+            "adapter_type": "StereoTokenTransformer",
+        },
+        path,
+    )
+
+
 def _upsample_token_grid_bilinear_torch(token_values: Any, output_height: int, output_width: int, *, device: str) -> Any:
     import torch.nn.functional as F
 
@@ -700,6 +1072,7 @@ def predict_dinov2_stereo_disparity(
     max_disparity: int,
     min_disparity: int,
     min_confidence: float,
+    input_scale: int,
     token_median_filter_size: int,
     consistency_threshold: float,
     fill_invalid_passes: int,
@@ -709,12 +1082,15 @@ def predict_dinov2_stereo_disparity(
     repo_path: str | Path | None,
     checkpoint_path: str | Path,
     device: str,
+    adapter_model: Any | None = None,
+    adapter_batch_size: int = 4096,
 ) -> Dinov2StereoPrediction:
     torch = _require_torch()
 
     left_tokens, _, _, model_patch_size = extract_dinov2_patch_tokens(
         left_gray,
         downsample_factor=downsample_factor,
+        input_scale=input_scale,
         model_name=model_name,
         repo_path=repo_path,
         checkpoint_path=checkpoint_path,
@@ -724,6 +1100,7 @@ def predict_dinov2_stereo_disparity(
     right_tokens, _, _, _ = extract_dinov2_patch_tokens(
         right_gray,
         downsample_factor=downsample_factor,
+        input_scale=input_scale,
         model_name=model_name,
         repo_path=repo_path,
         checkpoint_path=checkpoint_path,
@@ -733,13 +1110,44 @@ def predict_dinov2_stereo_disparity(
     if left_tokens.shape[:2] != right_tokens.shape[:2]:
         raise ValueError(f"DINOv2 token grid mismatch: left={tuple(left_tokens.shape[:2])}, right={tuple(right_tokens.shape[:2])}")
 
+    if adapter_model is not None:
+        adapter_model.eval()
+        left_tokens = encode_o4_descriptors_torch(
+            adapter_model,
+            left_tokens,
+            batch_size=int(adapter_batch_size),
+            device=device,
+            return_numpy=False,
+        )
+        right_tokens = encode_o4_descriptors_torch(
+            adapter_model,
+            right_tokens,
+            batch_size=int(adapter_batch_size),
+            device=device,
+            return_numpy=False,
+        )
+
     token_height, token_width, descriptor_dim = left_tokens.shape
-    token_span = max(1, int(downsample_factor) * int(model_patch_size))
+    token_span = max(1, int(round((float(downsample_factor) * float(model_patch_size)) / float(max(1, int(input_scale))))))
     max_token_disparity = min(
         max(int(min_disparity), int(max_disparity) // token_span),
         max(0, int(token_width) - 1),
     )
     min_token_disparity = min(int(min_disparity) // token_span, max_token_disparity)
+    left_content_mask = content_mask_from_gray(left_gray)
+    right_content_mask = content_mask_from_gray(right_gray)
+    left_token_content_mask = _build_token_content_mask_torch(
+        left_content_mask,
+        token_span,
+        tuple(left_tokens.shape[:2]),
+        device=device,
+    )
+    right_token_content_mask = _build_token_content_mask_torch(
+        right_content_mask,
+        token_span,
+        tuple(right_tokens.shape[:2]),
+        device=device,
+    )
 
     token_disparity, token_confidence, token_scores = _predict_token_disparity_torch(
         left_tokens,
@@ -747,19 +1155,30 @@ def predict_dinov2_stereo_disparity(
         min_token_disparity,
         max_token_disparity,
         device=device,
+        reference_valid_mask=left_token_content_mask,
+        target_valid_mask=right_token_content_mask,
     )
-    right_to_left_disparity, _, _ = _predict_token_disparity_torch(
+    right_to_left_disparity, _, right_to_left_scores = _predict_token_disparity_torch(
         right_tokens,
         left_tokens,
         min_token_disparity,
         max_token_disparity,
         device=device,
         target_direction="positive",
+        reference_valid_mask=right_token_content_mask,
+        target_valid_mask=left_token_content_mask,
     )
 
     if str(disparity_regression).strip().lower() == "soft_argmax":
         refined_token_disparity = _soft_argmax_disparity_torch(
             token_scores,
+            min_token_disparity,
+            max_token_disparity,
+            softmax_temperature,
+            device=device,
+        )
+        right_to_left_disparity = _soft_argmax_disparity_torch(
+            right_to_left_scores,
             min_token_disparity,
             max_token_disparity,
             softmax_temperature,
@@ -773,15 +1192,76 @@ def predict_dinov2_stereo_disparity(
             max_token_disparity,
             device=device,
         )
+        right_to_left_disparity = _refine_token_disparity_torch(
+            right_to_left_disparity,
+            right_to_left_scores,
+            min_token_disparity,
+            max_token_disparity,
+            device=device,
+        )
+    left_cost_volume = (-token_scores).permute(1, 2, 0).contiguous().to(dtype=torch.float32)
+    right_cost_volume = (-right_to_left_scores).permute(1, 2, 0).contiguous().to(dtype=torch.float32)
+    left_pair_mask = _stereo_cost_valid_mask_torch(
+        left_token_content_mask,
+        right_token_content_mask,
+        min_token_disparity,
+        max_token_disparity,
+        "negative",
+        device=device,
+    )
+    right_pair_mask = _stereo_cost_valid_mask_torch(
+        right_token_content_mask,
+        left_token_content_mask,
+        min_token_disparity,
+        max_token_disparity,
+        "positive",
+        device=device,
+    )
+    left_cost_volume = left_cost_volume.masked_fill(~left_pair_mask, float("inf"))
+    right_cost_volume = right_cost_volume.masked_fill(~right_pair_mask, float("inf"))
+    left_guide_tokens = _build_token_guide_torch(
+        left_gray,
+        downsample_factor,
+        input_scale,
+        model_patch_size,
+        tuple(left_tokens.shape[:2]),
+        device=device,
+    )
+    right_guide_tokens = _build_token_guide_torch(
+        right_gray,
+        downsample_factor,
+        input_scale,
+        model_patch_size,
+        tuple(right_tokens.shape[:2]),
+        device=device,
+    )
+    refined_token_disparity, sgm_confidence = _solve_content_masked_sgm_from_cost_torch(
+        left_cost_volume,
+        left_guide_tokens,
+        left_token_content_mask,
+        min_disparity=int(min_token_disparity),
+        device=device,
+    )
+    right_to_left_disparity, _ = _solve_content_masked_sgm_from_cost_torch(
+        right_cost_volume,
+        right_guide_tokens,
+        right_token_content_mask,
+        min_disparity=int(min_token_disparity),
+        device=device,
+    )
+    token_confidence = sgm_confidence
     consistency_mask = _left_right_consistency_mask_torch(
         refined_token_disparity,
         right_to_left_disparity,
         consistency_threshold,
         device=device,
     )
-    confidence_tokens = token_confidence.masked_fill(token_confidence < float(min_confidence), 0.0).float()
-    official_token_disparity = refined_token_disparity.masked_fill(~consistency_mask, 0.0).float()
+    confidence_mask = token_confidence >= float(min_confidence)
+    valid_token_mask = consistency_mask & confidence_mask & left_token_content_mask
+    confidence_tokens = token_confidence.masked_fill(~valid_token_mask, 0.0).float()
+    official_token_disparity = refined_token_disparity.masked_fill(~valid_token_mask, 0.0).float()
     display_token_disparity = _fill_invalid_disparity_torch(official_token_disparity, fill_invalid_passes, device=device)
+    display_token_disparity = display_token_disparity.masked_fill(~left_token_content_mask, 0.0).float()
     if int(token_median_filter_size) > 1:
         token_mask = official_token_disparity > 0
         filtered_official = _median_filter_2d_torch(official_token_disparity, token_median_filter_size, device=device)
@@ -789,6 +1269,8 @@ def predict_dinov2_stereo_disparity(
         display_mask = display_token_disparity > 0
         filtered_display = _median_filter_2d_torch(display_token_disparity, token_median_filter_size, device=device)
         display_token_disparity = filtered_display.masked_fill(~display_mask, 0.0).float()
+    official_token_disparity = official_token_disparity.masked_fill(~left_token_content_mask, 0.0).float()
+    display_token_disparity = display_token_disparity.masked_fill(~left_token_content_mask, 0.0).float()
 
     output_height, output_width = int(left_gray.shape[0]), int(left_gray.shape[1])
     token_disparity_pixels = official_token_disparity.float() * float(token_span)
@@ -815,6 +1297,10 @@ def predict_dinov2_stereo_disparity(
     raw_disparity = torch.where(torch.isfinite(raw_disparity) & (raw_disparity > 0), raw_disparity, torch.zeros_like(raw_disparity)).float()
     disparity = torch.where(torch.isfinite(disparity) & (disparity > 0), disparity, torch.zeros_like(disparity)).float()
     confidence = torch.where(torch.isfinite(confidence) & (confidence > 0), confidence, torch.zeros_like(confidence)).float()
+    pixel_content_mask = torch.as_tensor(left_content_mask, dtype=torch.bool, device=device)
+    raw_disparity = raw_disparity.masked_fill(~pixel_content_mask, 0.0).float()
+    disparity = disparity.masked_fill(~pixel_content_mask, 0.0).float()
+    confidence = confidence.masked_fill(~pixel_content_mask, 0.0).float()
 
     score_count = max_token_disparity - min_token_disparity + 1
     estimated_bytes = (
@@ -896,14 +1382,15 @@ def _write_fold_metrics(fold_metrics_file: Path, rows: list[dict[str, Any]], num
                 writer.writerow({"fold": fold, "scene_count": len(fold_rows), "mean_mae": "NA", "mean_rmse": "NA", "mean_bad_1px": "NA"})
 
 
-def refine_dinov2_output_disparity(disparity: Any, confidence: Any, guide_gray: Any) -> Any:
+def refine_dinov2_output_disparity(disparity: Any, confidence: Any, guide_gray: Any, content_mask: Any | None = None) -> Any:
     import cv2
     import numpy as np
     from scipy import ndimage
 
     source = np.asarray(disparity, dtype=np.float32)
     guide = np.asarray(guide_gray, dtype=np.float32)
-    valid = np.isfinite(source) & (source > 0)
+    region = np.ones(source.shape, dtype=bool) if content_mask is None else np.asarray(content_mask, dtype=bool)
+    valid = np.isfinite(source) & (source > 0) & region
     if not bool(np.any(valid)):
         return np.zeros_like(source, dtype=np.float32)
 
@@ -918,6 +1405,7 @@ def refine_dinov2_output_disparity(disparity: Any, confidence: Any, guide_gray: 
     nearest_indices = np.asarray(ndimage.distance_transform_edt(~valid, return_distances=False, return_indices=True), dtype=np.int64)
     dense = clipped[nearest_indices[0], nearest_indices[1]].astype(np.float32)
     dense = np.where(np.isfinite(dense) & (dense > 0), dense, 0.0).astype(np.float32)
+    dense = np.where(region, dense, 0.0).astype(np.float32)
 
     guide_range = max(float(guide.max() - guide.min()), 1.0)
     guide_unit = ((guide - float(guide.min())) / guide_range).astype(np.float32)
@@ -933,9 +1421,9 @@ def refine_dinov2_output_disparity(disparity: Any, confidence: Any, guide_gray: 
         keep_weight = np.clip(conf / scale, 0.0, 1.0).astype(np.float32)
     else:
         keep_weight = np.zeros_like(source, dtype=np.float32)
-    keep_weight = np.where(valid, keep_weight, 0.0).astype(np.float32)
+    keep_weight = np.where(valid & region, keep_weight, 0.0).astype(np.float32)
     refined = (keep_weight * clipped) + ((1.0 - keep_weight) * smoothed)
-    refined = np.where(np.isfinite(refined) & (refined > 0), refined, 0.0).astype(np.float32)
+    refined = np.where(region & np.isfinite(refined) & (refined > 0), refined, 0.0).astype(np.float32)
     return refined
 
 
@@ -958,23 +1446,29 @@ def filter_dinov2_reliable_disparity(disparity: Any, confidence: Any, min_confid
 def _resolve_run_device(config: Any) -> tuple[str, str]:
     torch = _require_torch()
 
-    def select_cuda(reason: str) -> tuple[str, str]:
+    def select_cuda(device_name: str, reason: str) -> tuple[str, str]:
+        requested_cuda_index = cuda_device_index(device_name)
+        memory_device = 0 if requested_cuda_index is None else requested_cuda_index
         try:
-            torch.cuda.set_per_process_memory_fraction(0.19, 0)
+            torch.cuda.set_per_process_memory_fraction(0.19, memory_device)
         except Exception:
             pass
-        return "cuda", reason
+        return device_name, reason
 
     requested = str(getattr(config, "device", "auto")).strip().lower() or "auto"
     prefer_cuda = bool(getattr(config, "prefer_cuda", True))
-    if requested == "cuda" and torch.cuda.is_available():
-        return select_cuda("torch CUDA requested and available; memory fraction capped at 0.19")
-    if requested == "cuda":
-        return "cpu", "torch CUDA requested but unavailable; using CPU"
+    if is_cuda_device_name(requested) and torch.cuda.is_available():
+        requested_cuda_index = cuda_device_index(requested)
+        visible_cuda_count = int(torch.cuda.device_count())
+        if requested_cuda_index is not None and requested_cuda_index >= visible_cuda_count:
+            return "cpu", f"{requested} requested but only {visible_cuda_count} CUDA device(s) are visible; using CPU"
+        return select_cuda(requested, f"{requested} requested and available; memory fraction capped at 0.19")
+    if is_cuda_device_name(requested):
+        return "cpu", f"{requested} requested but CUDA is unavailable; using CPU"
     if requested == "cpu":
         return "cpu", "CPU requested"
     if prefer_cuda and torch.cuda.is_available():
-        return select_cuda("torch CUDA is available; memory fraction capped at 0.19")
+        return select_cuda("cuda", "torch CUDA is available; memory fraction capped at 0.19")
     return "cpu", "using CPU because CUDA is unavailable or not preferred"
 
 
@@ -1026,9 +1520,6 @@ def run_dinov2_objective(
     dry_run: bool,
     scene_name: str | None,
 ) -> int:
-    from common import discover_scenes, evaluate_disparity, filter_scene_dirs, load_gray, normalize_for_preview, write_png, write_scene_text
-    from pfm import read_pfm, write_pfm
-
     discovered_scenes = discover_scenes(middlebury_root)
     scenes = filter_scene_dirs(discovered_scenes, scene_name)
     if max_scenes is not None:
@@ -1060,7 +1551,7 @@ def run_dinov2_objective(
     print(
         "O4 DINOv2 model config: "
         f"downsample_factor={config.downsample_factor}, max_disparity={config.max_disparity}, "
-        f"device={device}, descriptor_source={status.descriptor_source}, "
+        f"dinov2_input_scale={config.dinov2_input_scale}, device={device}, descriptor_source={status.descriptor_source}, "
         f"model={config.dinov2_model_name}, checkpoint={config.dinov2_checkpoint_path}, "
         f"disparity_regression={config.disparity_regression}"
     )
@@ -1086,11 +1577,58 @@ def run_dinov2_objective(
     config.disparity_dir.mkdir(parents=True, exist_ok=True)
     config.analysis_dir.mkdir(parents=True, exist_ok=True)
     scene_fold_map = {scene.name: index % config.num_folds for index, scene in enumerate(discovered_scenes)}
+    adapter_models: dict[int, Any] = {}
+    adapter_paths: dict[int, Path] = {}
+    adapter_sample_counts: dict[int, int] = {}
+    if int(config.training_epochs) > 0:
+        adapter_dir = config.metrics_file.parent / "dinov2_adapters"
+        print(
+            "Training DINOv2 stereo adapters: "
+            f"folds={config.num_folds}, epochs={config.training_epochs}, "
+            f"samples_per_fold<={config.max_training_samples}, save_dir={adapter_dir}",
+            flush=True,
+        )
+        samples_by_fold = _collect_dinov2_training_samples_by_fold(discovered_scenes, scene_fold_map, config, device=device)
+        for fold in range(int(config.num_folds)):
+            training_descriptors, candidate_descriptors, sample_count = samples_by_fold[fold]
+            adapter_sample_counts[fold] = int(sample_count)
+            if sample_count <= 0:
+                print(f"Skipping DINOv2 adapter fold {fold}: no training samples", flush=True)
+                continue
+            adapter = train_o4_torch_model(
+                training_descriptors,
+                candidate_descriptors,
+                model_dim=config.model_dim,
+                hidden_dim=config.encoder_hidden_dim,
+                encoder_layers=config.encoder_layers,
+                epochs=config.training_epochs,
+                learning_rate=config.training_learning_rate,
+                weight_decay=config.weight_decay,
+                batch_size=config.training_batch_size,
+                random_seed=int(config.random_seed) + fold,
+                device=device,
+            )
+            if adapter is None:
+                print(f"Skipping DINOv2 adapter fold {fold}: training returned no model", flush=True)
+                continue
+            adapter.eval()
+            adapter_models[fold] = adapter
+            adapter_path = adapter_dir / f"dinov2_adapter_fold{fold}.pt"
+            _save_dinov2_adapter_checkpoint(adapter_path, adapter, config, fold=fold, sample_count=sample_count)
+            adapter_paths[fold] = adapter_path
+            print(
+                f"Saved DINOv2 adapter fold {fold}: {adapter_path} "
+                f"(samples={sample_count}, parameters={int(getattr(adapter, 'parameter_count', 0))})",
+                flush=True,
+            )
     metric_rows: list[dict[str, Any]] = []
-    generator_name = "O4 DINOv2 direct model patch-token stereo disparity"
+    generator_name = "O4 DINOv2 trained stereo-adapter patch-token disparity" if adapter_models else "O4 DINOv2 direct model patch-token stereo disparity"
     for scene_dir in scenes:
         left_gray = load_gray(scene_dir / "im0.png")
         right_gray = load_gray(scene_dir / "im1.png")
+        left_content_mask = content_mask_from_gray(left_gray)
+        fold = scene_fold_map[scene_dir.name]
+        adapter_model = adapter_models.get(fold)
         prediction = predict_dinov2_stereo_disparity(
             left_gray,
             right_gray,
@@ -1098,6 +1636,7 @@ def run_dinov2_objective(
             max_disparity=config.max_disparity,
             min_disparity=config.min_disparity,
             min_confidence=config.min_confidence,
+            input_scale=config.dinov2_input_scale,
             token_median_filter_size=config.token_median_filter_size,
             consistency_threshold=config.consistency_threshold,
             fill_invalid_passes=config.fill_invalid_passes,
@@ -1107,16 +1646,19 @@ def run_dinov2_objective(
             repo_path=config.dinov2_repo_path,
             checkpoint_path=config.dinov2_checkpoint_path,
             device=device,
+            adapter_model=adapter_model,
+            adapter_batch_size=config.inference_batch_size,
         )
-        display_disparity = refine_dinov2_output_disparity(prediction.disparity, prediction.confidence, left_gray)
+        display_disparity = refine_dinov2_output_disparity(prediction.disparity, prediction.confidence, left_gray, left_content_mask)
         disparity, reliable_confidence_floor, reliable_pixel_count = filter_dinov2_reliable_disparity(
             display_disparity,
             prediction.confidence,
             config.min_confidence,
             55.0,
         )
-        raw_disparity = prediction.raw_disparity
-        confidence = prediction.confidence
+        disparity = _apply_content_mask(disparity, left_content_mask)
+        raw_disparity = _apply_content_mask(prediction.raw_disparity, left_content_mask)
+        confidence = np.where(np.asarray(left_content_mask, dtype=bool), prediction.confidence, 0.0).astype(np.float32)
         disparity_scene_dir = config.disparity_dir / scene_dir.name
         analysis_scene_dir = config.analysis_dir / scene_dir.name
         disparity_scene_dir.mkdir(parents=True, exist_ok=True)
@@ -1124,8 +1666,8 @@ def run_dinov2_objective(
 
         write_pfm(disparity_scene_dir / "disp0.pfm", disparity)
         write_pfm(disparity_scene_dir / "disp0_transformer_raw.pfm", raw_disparity)
-        disparity_preview = normalize_for_preview(display_disparity, display_disparity > 0)
-        raw_disparity_preview = normalize_for_preview(raw_disparity, raw_disparity > 0)
+        disparity_preview = colorize_disparity_depth_map(display_disparity, display_disparity > 0)
+        raw_disparity_preview = colorize_disparity_depth_map(raw_disparity, raw_disparity > 0)
         write_png(disparity_scene_dir / "disp0.png", disparity_preview)
         write_png(disparity_scene_dir / "disp0_transformer_raw.png", raw_disparity_preview)
 
@@ -1150,7 +1692,6 @@ def run_dinov2_objective(
         error_color[error_map <= 0] = 0
         write_png(analysis_scene_dir / "error_map.png", error_color)
 
-        fold = scene_fold_map[scene_dir.name]
         reliable_confidence_mask = (disparity > 0) & (confidence > 0)
         mean_confidence = float(confidence[reliable_confidence_mask].mean()) if bool(reliable_confidence_mask.any()) else 0.0
         readme_lines = [
@@ -1160,16 +1701,20 @@ def run_dinov2_objective(
             f"token_grid: {prediction.token_height}x{prediction.token_width}",
             f"descriptor_dim: {prediction.descriptor_dim}",
             f"token_span_pixels: {prediction.token_span}",
+            f"dinov2_input_scale: {config.dinov2_input_scale}",
             f"model_patch_size: {prediction.model_patch_size}",
             f"min_token_disparity: {prediction.min_token_disparity}",
             f"max_token_disparity: {prediction.max_token_disparity}",
             f"resolved_execution_mode: dinov2_cost_volume",
             f"descriptor_source: {status.descriptor_source}",
-            "final_disparity_source: DINOv2 model forward patch-token prediction",
-            "training_used: no",
-            "sgm_detail_fusion_used: no",
+            "final_disparity_source: DINOv2 patch-token cost volume with O3-style SGM aggregation",
+            f"training_used: {'yes' if adapter_model is not None else 'no'}",
+            f"dinov2_adapter_checkpoint: {adapter_paths.get(fold, 'none')}",
+            f"dinov2_adapter_training_samples: {adapter_sample_counts.get(fold, 0)}",
+            f"dinov2_adapter_parameters: {int(getattr(adapter_model, 'parameter_count', 0)) if adapter_model is not None else 0}",
+            "sgm_detail_fusion_used: yes",
             "raw_transformer_disparity: disp0_transformer_raw.pfm",
-            "final_upsampling: weighted_bilinear_from_dinov2_patch_tokens",
+            "final_upsampling: weighted_bilinear_from_dinov2_sgm_patch_tokens",
             "final_postprocess: confidence_weighted_guided_smoothing_from_dinov2_prediction",
             f"official_pfm_confidence_floor: {reliable_confidence_floor:.6f}",
             f"official_pfm_reliable_pixels: {reliable_pixel_count}",
