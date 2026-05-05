@@ -674,9 +674,12 @@ def train_o4_torch_model(
     batch_size: int,
     random_seed: int,
     device: str,
+    initial_model: Any | None = None,
+    epoch_offset: int = 0,
+    total_epoch_count: int | None = None,
 ) -> Any | None:
     if training_descriptors.size == 0 or candidate_descriptors.size == 0 or epochs <= 0:
-        return None
+        return initial_model if initial_model is not None else None
 
     feature_dim = int(training_descriptors.shape[1])
     if feature_dim <= 0:
@@ -686,7 +689,11 @@ def train_o4_torch_model(
     if is_cuda_device_name(device):
         torch.cuda.manual_seed_all(int(random_seed))
 
-    model = build_stereo_token_transformer(feature_dim, model_dim, hidden_dim, encoder_layers, device=device)
+    if initial_model is None:
+        model = build_stereo_token_transformer(feature_dim, model_dim, hidden_dim, encoder_layers, device=device)
+    else:
+        model = initial_model.to(device)
+        model.train()
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -705,6 +712,10 @@ def train_o4_torch_model(
     min_lr = base_lr * 0.05
     global_step = 0
     epoch_count = max(1, int(epochs))
+    display_total_epochs = max(
+        int(epoch_offset) + epoch_count,
+        int(total_epoch_count) if total_epoch_count is not None else epoch_count,
+    )
     log_interval = max(1, epoch_count // 10)
 
     for epoch_index in range(epoch_count):
@@ -751,8 +762,8 @@ def train_o4_torch_model(
                 logit_scale_value = float("nan")
             print(
                 "O4 train epoch {0:02d}/{1:02d}: loss={2:.4f} top1={3:.4f} lr={4:.2e} logit_scale={5:.2f}".format(
-                    epoch_index + 1,
-                    epoch_count,
+                    int(epoch_offset) + epoch_index + 1,
+                    display_total_epochs,
                     mean_loss,
                     top1,
                     current_lr,

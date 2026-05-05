@@ -11,12 +11,13 @@ import numpy as np
 from scipy import ndimage
 
 from common import (
-    content_mask_from_gray,
+    content_bbox_from_gray,
     discover_scenes,
     evaluate_disparity,
     filter_scene_dirs,
     load_gray,
     normalize_for_preview,
+    rectangular_mask_from_bbox,
     write_png,
     write_scene_text,
 )
@@ -36,6 +37,7 @@ from o3 import (
 )
 from o4_torch import (
     average_pool_gray_torch,
+    build_stereo_token_transformer,
     build_token_descriptors_torch,
     build_token_ground_truth_torch,
     collect_o4_training_samples_torch,
@@ -115,6 +117,59 @@ def save_o4_model_checkpoint(path: Path, model_state: O4ModelState, config: O4Co
             downsample_factor=np.asarray(int(config.downsample_factor), dtype=np.int32),
             patch_size=np.asarray(int(config.patch_size), dtype=np.int32),
         )
+
+
+def load_o4_model_checkpoint(path: Path, config: O4Config, *, fold: int, device: str) -> tuple[int, int, O4ModelState] | None:
+    if not path.exists():
+        return None
+
+    import torch
+
+    checkpoint = torch.load(path, map_location=device)
+    expected_values = {
+        "fold": int(fold),
+        "model_dim": int(config.model_dim),
+        "encoder_hidden_dim": int(config.encoder_hidden_dim),
+        "encoder_layers": int(config.encoder_layers),
+        "negative_samples": int(config.negative_samples),
+        "max_training_samples": int(config.max_training_samples),
+        "execution_mode": str(config.execution_mode),
+        "downsample_factor": int(config.downsample_factor),
+        "patch_size": int(config.patch_size),
+        "max_disparity": int(config.max_disparity),
+        "min_disparity": int(config.min_disparity),
+    }
+    for key, expected in expected_values.items():
+        if checkpoint.get(key) != expected:
+            print(
+                f"Skipping O4 checkpoint {path}: {key}={checkpoint.get(key)!r} does not match {expected!r}",
+                file=sys.stderr,
+            )
+            return None
+
+    input_dim = int(checkpoint.get("input_dim", 0))
+    if input_dim <= 0:
+        print(f"Skipping O4 checkpoint {path}: missing input_dim", file=sys.stderr)
+        return None
+
+    model = build_stereo_token_transformer(
+        input_dim,
+        int(config.model_dim),
+        int(config.encoder_hidden_dim),
+        int(config.encoder_layers),
+        device=device,
+    )
+    model.load_state_dict(checkpoint["state_dict"])
+    model.eval()
+    model_state = O4ModelState(
+        backend="torch",
+        device=str(device),
+        trained=True,
+        torch_model=model,
+        parameter_count=int(checkpoint.get("parameter_count", getattr(model, "parameter_count", 0))),
+        checkpoint_path=path,
+    )
+    return int(checkpoint.get("sample_count", 0)), int(checkpoint.get("training_epochs", 0)), model_state
 
 
 def read_metrics(metrics_file: Path) -> list[MetricRow]:
@@ -547,6 +602,25 @@ def upsample_token_grid(token_values: Any, span: int, output_height: int, output
     copy_width = min(output_width, upsampled.shape[1])
     result[:copy_height, :copy_width] = upsampled[:copy_height, :copy_width]
     return result
+
+
+def build_o4_content_mask(image: Any, threshold: float = 2.0, min_fraction: float = 0.005) -> Any:
+    """Build an O4-only mask that excludes black corners inside the content bbox."""
+
+    source = np.asarray(image)
+    if source.ndim == 3:
+        source = source.max(axis=2)
+    if source.ndim != 2:
+        raise ValueError("build_o4_content_mask expects a 2D grayscale image or an RGB image.")
+
+    bbox_mask = rectangular_mask_from_bbox(
+        source.shape,
+        content_bbox_from_gray(source, threshold=threshold, min_fraction=min_fraction),
+    )
+    nonblack = np.isfinite(source) & (source.astype(np.float32) > float(threshold))
+    if not bool(np.any(nonblack)):
+        return np.ones(source.shape, dtype=bool)
+    return bbox_mask & nonblack
 
 
 def build_token_content_mask(content_mask: Any, token_span: int, token_shape: tuple[int, int]) -> Any:
@@ -1044,8 +1118,8 @@ def run(
     for scene_dir in payload_scene_dirs:
         left_gray = load_gray(scene_dir / "im0.png")
         right_gray = load_gray(scene_dir / "im1.png")
-        left_content_mask = content_mask_from_gray(left_gray)
-        right_content_mask = content_mask_from_gray(right_gray)
+        left_content_mask = build_o4_content_mask(left_gray)
+        right_content_mask = build_o4_content_mask(right_gray)
         if use_cuda_o4:
             downsampled_left = average_pool_gray_torch(left_gray, config.downsample_factor, device=backend_status.device)
             downsampled_right = average_pool_gray_torch(right_gray, config.downsample_factor, device=backend_status.device)
@@ -1126,7 +1200,72 @@ def run(
     fold_models: dict[int, O4ModelState] = {}
     fold_training_stats: dict[int, tuple[int, O4ModelState]] = {}
     if execution_status.selected_mode in trainable_token_modes:
+        save_checkpoint_dir = config.metrics_file.parent / "o4_models"
+        load_checkpoint_dir = config.resume_checkpoint_dir if config.resume_checkpoint_dir is not None else save_checkpoint_dir
         for fold_index in range(config.num_folds):
+            checkpoint_path = save_checkpoint_dir / f"o4_model_fold{fold_index}.pt"
+            load_checkpoint_path = load_checkpoint_dir / f"o4_model_fold{fold_index}.pt"
+            loaded_checkpoint = (
+                load_o4_model_checkpoint(load_checkpoint_path, config, fold=fold_index, device=backend_status.device)
+                if backend_status.use_torch
+                else None
+            )
+            if loaded_checkpoint is not None:
+                sample_count, completed_epochs, model_state = loaded_checkpoint
+                additional_epochs = max(0, int(config.training_epochs) - int(completed_epochs))
+                if additional_epochs > 0 and model_state.torch_model is not None:
+                    if use_cuda_o4:
+                        training_descriptors, candidate_descriptors = collect_o4_training_samples_torch(
+                            scene_payloads,
+                            fold_index,
+                            config,
+                            device=backend_status.device,
+                        )
+                    else:
+                        training_descriptors, candidate_descriptors = collect_o4_training_samples(scene_payloads, fold_index, config)
+                    resumed_model = train_o4_torch_model(
+                        training_descriptors,
+                        candidate_descriptors,
+                        model_dim=config.model_dim,
+                        hidden_dim=config.encoder_hidden_dim,
+                        encoder_layers=config.encoder_layers,
+                        epochs=additional_epochs,
+                        learning_rate=config.training_learning_rate,
+                        weight_decay=config.weight_decay,
+                        batch_size=config.training_batch_size,
+                        random_seed=int(config.random_seed) + int(completed_epochs),
+                        device=backend_status.device,
+                        initial_model=model_state.torch_model,
+                        epoch_offset=int(completed_epochs),
+                        total_epoch_count=int(config.training_epochs),
+                    )
+                    if resumed_model is not None:
+                        model_state = O4ModelState(
+                            backend="torch",
+                            device=backend_status.device,
+                            trained=True,
+                            torch_model=resumed_model,
+                            parameter_count=int(getattr(resumed_model, "parameter_count", 0)),
+                        )
+                        sample_count = int(training_descriptors.shape[0])
+                        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+                        save_o4_model_checkpoint(checkpoint_path, model_state, config, fold=fold_index, sample_count=sample_count)
+                        model_state.checkpoint_path = checkpoint_path
+                        print(
+                            f"Resumed O4 model fold {fold_index}: {checkpoint_path} "
+                            f"(completed_epochs={completed_epochs}, total_epochs={config.training_epochs}, samples={sample_count})",
+                            flush=True,
+                        )
+                fold_models[fold_index] = model_state
+                fold_training_stats[fold_index] = (sample_count, model_state)
+                if additional_epochs <= 0:
+                    print(
+                        f"Loaded O4 model fold {fold_index}: {load_checkpoint_path} "
+                        f"(epochs={completed_epochs}, samples={sample_count}, parameters={model_state.parameter_count})",
+                        flush=True,
+                    )
+                continue
+
             if use_cuda_o4:
                 training_descriptors, candidate_descriptors = collect_o4_training_samples_torch(
                     scene_payloads,

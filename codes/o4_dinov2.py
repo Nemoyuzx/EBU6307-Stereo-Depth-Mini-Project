@@ -10,7 +10,17 @@ from typing import Any
 
 import numpy as np
 
-from common import content_mask_from_gray, discover_scenes, evaluate_disparity, filter_scene_dirs, load_gray, normalize_for_preview, write_png, write_scene_text
+from common import (
+    content_bbox_from_gray,
+    discover_scenes,
+    evaluate_disparity,
+    filter_scene_dirs,
+    load_gray,
+    normalize_for_preview,
+    rectangular_mask_from_bbox,
+    write_png,
+    write_scene_text,
+)
 from o3 import colorize_disparity_depth_map, solve_sgm_from_cost_torch
 from o4_torch import (
     build_token_ground_truth_torch,
@@ -736,6 +746,23 @@ def _stereo_cost_valid_mask_torch(reference_mask: Any, target_mask: Any, min_dis
     return valid
 
 
+def _build_nonblack_content_mask(image: Any, threshold: float = 2.0, min_fraction: float = 0.005) -> Any:
+    source = np.asarray(image)
+    if source.ndim == 3:
+        source = source.max(axis=2)
+    if source.ndim != 2:
+        raise ValueError("_build_nonblack_content_mask expects a 2D grayscale image or an RGB image.")
+
+    bbox_mask = rectangular_mask_from_bbox(
+        source.shape,
+        content_bbox_from_gray(source, threshold=threshold, min_fraction=min_fraction),
+    )
+    nonblack = np.isfinite(source) & (source.astype(np.float32) > float(threshold))
+    if not bool(np.any(nonblack)):
+        return np.ones(source.shape, dtype=bool)
+    return bbox_mask & nonblack
+
+
 def _token_mask_bbox_torch(mask: Any) -> tuple[int, int, int, int] | None:
     locations = mask.nonzero(as_tuple=False)
     if int(locations.numel()) == 0:
@@ -1134,8 +1161,8 @@ def predict_dinov2_stereo_disparity(
         max(0, int(token_width) - 1),
     )
     min_token_disparity = min(int(min_disparity) // token_span, max_token_disparity)
-    left_content_mask = content_mask_from_gray(left_gray)
-    right_content_mask = content_mask_from_gray(right_gray)
+    left_content_mask = _build_nonblack_content_mask(left_gray)
+    right_content_mask = _build_nonblack_content_mask(right_gray)
     left_token_content_mask = _build_token_content_mask_torch(
         left_content_mask,
         token_span,
@@ -1626,7 +1653,7 @@ def run_dinov2_objective(
     for scene_dir in scenes:
         left_gray = load_gray(scene_dir / "im0.png")
         right_gray = load_gray(scene_dir / "im1.png")
-        left_content_mask = content_mask_from_gray(left_gray)
+        left_content_mask = _build_nonblack_content_mask(left_gray)
         fold = scene_fold_map[scene_dir.name]
         adapter_model = adapter_models.get(fold)
         prediction = predict_dinov2_stereo_disparity(

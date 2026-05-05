@@ -55,6 +55,7 @@ class O4Config:
     analysis_dir: Path
     metrics_file: Path
     fold_metrics_file: Path
+    resume_checkpoint_dir: Path | None
     num_folds: int
     downsample_factor: int
     patch_size: int
@@ -208,6 +209,7 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
     dinov2_model_name = str(o4_block.get("dinov2_model_name", "facebook/dinov2-base")).strip() or "facebook/dinov2-base"
     dinov2_repo_value = o4_block.get("dinov2_repo_path")
     dinov2_checkpoint_value = o4_block.get("dinov2_checkpoint_path")
+    resume_checkpoint_value = o4_block.get("resume_checkpoint_dir")
     dinov2_input_scale = max(1, int(o4_block.get("dinov2_input_scale", 1)))
     from o4_dinov2 import resolve_dinov2_checkpoint_path
     model_dim = max(4, int(o4_block.get("model_dim", 24)))
@@ -281,6 +283,9 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
             analysis_dir=resolve_path(repo_root, o4_analysis_value),
             metrics_file=resolve_path(repo_root, o4_metrics_value),
             fold_metrics_file=resolve_path(repo_root, o4_fold_metrics_value),
+            resume_checkpoint_dir=(
+                resolve_path(repo_root, str(resume_checkpoint_value)) if resume_checkpoint_value is not None else None
+            ),
             num_folds=num_folds,
             downsample_factor=downsample_factor,
             patch_size=patch_size,

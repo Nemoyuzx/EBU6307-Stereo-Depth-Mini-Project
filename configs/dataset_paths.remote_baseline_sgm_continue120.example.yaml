@@ -1,0 +1,47 @@
+# Remote-only O4 non-DINO continuation profile.
+# Continues the trained baseline_sgm ViT checkpoints to 120 total epochs
+# and writes inference outputs to separate directories.
+
+remote:
+  repo_root: .
+  datasets_root: workspace/data
+  middlebury_root: workspace/data/middlebury
+
+results:
+  o4a_transformer_dir: results/O4a_transformer_continue120
+  o4b_transformer_dir: results/O4b_transformer_continue120
+  o4c_metrics_file: results/O4c_transformer_continue120/metrics.csv
+  o4c_fold_metrics_file: results/O4c_transformer_continue120/fold_summary.csv
+
+o4:
+  num_folds: 5
+  downsample_factor: 1
+  patch_size: 2
+  max_disparity: 288
+  min_disparity: 0
+  min_confidence: 0.005
+  token_median_filter_size: 5
+  backend: auto
+  device: cuda:1
+  prefer_cuda: true
+  execution_mode: baseline_sgm
+  resume_checkpoint_dir: results/O4c_transformer/o4_models
+  model_dim: 96
+  encoder_hidden_dim: 384
+  encoder_layers: 4
+  disparity_regression: quadratic
+  softmax_temperature: 1.0
+  training_epochs: 120
+  training_learning_rate: 0.0005
+  training_batch_size: 1536
+  inference_batch_size: 4096
+  negative_samples: 12
+  max_training_samples: 60000
+  weight_decay: 0.0003
+  context_window_size: 3
+  fine_detail_weight: 0.0
+  consistency_threshold: 1.0
+  fill_invalid_passes: 4
+  speckle_max_size: 100
+  speckle_max_diff: 1.5
+  random_seed: 0
