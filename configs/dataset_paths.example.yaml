@@ -15,6 +15,7 @@ results:
   # a folders: pipeline / architecture assets only.
   # b folders: scene-level result images, PFM outputs, and visual examples.
   # c folders: metric CSV files.
+  o1a_synthetic_dir: results/O1a_synthetic_data
   o1b_synthetic_dir: results/O1b_synthetic_data
   o1c_metrics_file: results/O1c_synthetic_data/SSIM.csv
   o2a_sift_dir: results/O2a_sift

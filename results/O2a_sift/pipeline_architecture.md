@@ -85,6 +85,7 @@ Descriptors from the original image and transformed image are matched with Eucli
 
 ## Main Artifacts
 
+- `results/O2a_sift/sift_pipeline.jpg`: PDF/visual pipeline asset.
 - `results/O2a_sift/pipeline_architecture.md`: pipeline / architecture description.
 - `results/O2b_sift/<scene>/im0_keypoints.png`: original image keypoint visualization.
 - `results/O2b_sift/<scene>/im1_keypoints.png`: transformed image keypoint visualization.

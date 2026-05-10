@@ -14,6 +14,7 @@ import numpy as np
 from scipy import ndimage
 
 
+from o2_PiplineDrawer import write_o2_pipeline_assets
 from common import discover_scenes, filter_scene_dirs, write_scene_text
 from config import O2Config
 
@@ -1214,6 +1215,8 @@ def run(
     config.pipeline_dir.mkdir(parents=True, exist_ok=True)
     config.keypoints_dir.mkdir(parents=True, exist_ok=True)
     config.matches_dir.mkdir(parents=True, exist_ok=True)
+    write_o2_pipeline_assets(config.pipeline_dir)
+    print(f"Wrote O2 PDF pipeline image: {config.pipeline_dir / 'sift_pipeline.jpg'}")
 
     # metric_rows 保存每个 scene 的评估结果，最后会写到 CSV 里
     metric_rows: list[dict[str, str | int | float]] = []

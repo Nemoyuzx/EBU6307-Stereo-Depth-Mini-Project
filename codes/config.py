@@ -12,6 +12,7 @@ MIDDLEBURY_PROBE_SCENES = ("artroom1", "ladder1", "skates1")
 class O1Config:
     repo_root: Path
     middlebury_root: Path
+    pipeline_dir: Path
     synthetic_dir: Path
     metrics_file: Path
     shift_pixels: int
@@ -132,6 +133,7 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
             f"Config {config_path} does not define middlebury_root at the top level or under profile '{profile}'."
         )
 
+    o1_pipeline_value = result_block.get("o1a_synthetic_dir") or "results/O1a_synthetic_data"
     synthetic_value = result_block.get("o1_synthetic_dir") or result_block.get("o1b_synthetic_dir") or "results/O1b_synthetic_data"
     metrics_value = result_block.get("o1_metrics_file") or result_block.get("o1c_metrics_file") or "results/O1c_synthetic_data/SSIM.csv"
     shift_pixels = int(o1_block.get("shift_pixels", 8))
@@ -252,6 +254,7 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
         o1=O1Config(
             repo_root=repo_root,
             middlebury_root=middlebury_root,
+            pipeline_dir=resolve_path(repo_root, o1_pipeline_value),
             synthetic_dir=resolve_path(repo_root, synthetic_value),
             metrics_file=resolve_path(repo_root, metrics_value),
             shift_pixels=shift_pixels,

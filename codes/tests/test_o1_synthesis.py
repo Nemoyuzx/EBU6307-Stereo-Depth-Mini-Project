@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -12,7 +13,15 @@ CODES_DIR = TESTS_DIR.parent
 if str(CODES_DIR) not in sys.path:
     sys.path.insert(0, str(CODES_DIR))
 
-from o1 import _fill_projection_holes, _project_left_to_synthetic_view, scale_reference_disparity, synthesize_depth_aware_stereo
+from PIL import Image
+
+from o1 import (
+    _fill_projection_holes,
+    _project_left_to_synthetic_view,
+    create_o1_pipeline_image,
+    scale_reference_disparity,
+    synthesize_depth_aware_stereo,
+)
 
 
 def _toy_rgb_image(height: int = 4, width: int = 6) -> np.ndarray:
@@ -91,6 +100,17 @@ class O1SynthesisTests(unittest.TestCase):
         self.assertTrue(np.all(filled[missing] > 0))
         self.assertFalse(np.array_equal(filled[0, 1], projected[0, 1]))
         self.assertFalse(np.array_equal(filled[1, 1], projected[1, 1]))
+
+    def test_create_o1_pipeline_image_writes_expected_canvas(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "syn_pipeline.jpg"
+
+            create_o1_pipeline_image(output_path)
+
+            self.assertTrue(output_path.exists())
+            with Image.open(output_path) as image:
+                self.assertEqual(image.size, (2240, 1536))
+                self.assertEqual(image.mode, "RGB")
 
 
 if __name__ == "__main__":

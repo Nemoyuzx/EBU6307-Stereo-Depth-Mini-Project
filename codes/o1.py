@@ -11,6 +11,7 @@ from PIL import Image
 from scipy import interpolate, ndimage
 from scipy.ndimage import gaussian_filter
 
+from o1_PiplineDrawer import create_o1_pipeline_image, write_o1_pipeline_assets
 from common import discover_scenes, ensure_parent, filter_scene_dirs, load_rgb
 from config import O1Config
 from pfm import read_pfm, write_pfm
@@ -364,7 +365,10 @@ def run(config: O1Config, max_scenes: int | None, dry_run: bool, scene_name: str
         print("Dry run requested; no outputs were written.")
         return 0
 
+    config.pipeline_dir.mkdir(parents=True, exist_ok=True)
     config.synthetic_dir.mkdir(parents=True, exist_ok=True)
+    write_o1_pipeline_assets(config.pipeline_dir)
+    print(f"Wrote O1 PDF pipeline diagram: {config.pipeline_dir / 'syn_pipeline.jpg'}")
     metric_rows: list[dict[str, str | float | int]] = []
     failed_scenes: list[str] = []
     for scene_dir in scenes:

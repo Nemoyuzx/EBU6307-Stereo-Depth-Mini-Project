@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -12,6 +14,7 @@ CODES_DIR = TESTS_DIR.parent
 if str(CODES_DIR) not in sys.path:
     sys.path.insert(0, str(CODES_DIR))
 
+from o2_PiplineDrawer import create_o2_pipeline_image
 from o2 import _mutual_ratio_matches, create_sift_detector
 
 
@@ -146,6 +149,17 @@ class ManualSiftDetectorTests(unittest.TestCase):
         self.assertEqual(descriptors.shape[0], len(keypoints))
         self.assertEqual(descriptors.shape[1], 128)
         self.assertLessEqual(len(keypoints), 64)
+
+    def test_create_o2_pipeline_image_writes_expected_canvas(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "sift_pipeline.jpg"
+
+            create_o2_pipeline_image(output_path)
+
+            self.assertTrue(output_path.exists())
+            with Image.open(output_path) as image:
+                self.assertEqual(image.size, (4096, 2276))
+                self.assertEqual(image.mode, "RGB")
 
     def test_descriptor_accumulates_into_single_4x4_block_histogram_bin(self) -> None:
         detector = create_sift_detector(max_features=64, contrast_threshold=0.04)
