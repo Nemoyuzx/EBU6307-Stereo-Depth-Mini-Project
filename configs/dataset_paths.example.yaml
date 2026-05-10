@@ -67,8 +67,8 @@ o4:
   min_confidence: 0.005
   token_median_filter_size: 5
   backend: auto
-  # Use cuda:1 on the remote machine to avoid occupying GPU0.
-  device: cuda:1
+  # Use GPU 0 on the remote/school CUDA machine.
+  device: cuda:0
   prefer_cuda: true
   # execution_mode 取值：baseline (token argmin + LR consistency)、
   #                   baseline_sgm (ViT 余弦得分 → O3 风格 SGM 聚合)、
