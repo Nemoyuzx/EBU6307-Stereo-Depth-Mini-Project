@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import os
 import sys
 from collections import deque
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 from scipy import ndimage
 from scipy.spatial import Delaunay, QhullError, cKDTree
 
@@ -135,51 +136,343 @@ def write_jpeg(path: Path, image: Any) -> None:
     Image.fromarray(array).convert("RGB").save(path, format="JPEG", quality=92)
 
 
-def _draw_centered_text(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], text: str, fill: tuple[int, int, int]) -> None:
+def _load_pipeline_font(size: int, bold: bool = False) -> Any:
+    font_name = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
+    try:
+        return ImageFont.truetype(font_name, size=size)
+    except OSError:
+        return ImageFont.load_default()
+
+
+def _draw_centered_text(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    text: str,
+    fill: tuple[int, int, int],
+    font: Any | None = None,
+    line_spacing: int = 6,
+) -> None:
     lines = text.split("\n")
     line_heights = []
     line_widths = []
     for line in lines:
-        bbox = draw.textbbox((0, 0), line)
+        bbox = draw.textbbox((0, 0), line, font=font)
         line_widths.append(bbox[2] - bbox[0])
         line_heights.append(bbox[3] - bbox[1])
-    total_height = sum(line_heights) + max(0, len(lines) - 1) * 6
+    total_height = sum(line_heights) + max(0, len(lines) - 1) * line_spacing
     y = box[1] + max(0, (box[3] - box[1] - total_height) // 2)
     for line, line_width, line_height in zip(lines, line_widths, line_heights):
         x = box[0] + max(0, (box[2] - box[0] - line_width) // 2)
-        draw.text((x, y), line, fill=fill)
-        y += line_height + 6
+        draw.text((x, y), line, fill=fill, font=font)
+        y += line_height + line_spacing
 
 
-def create_o3_pipeline_image(path: Path) -> None:
+def _box_left_center(box: tuple[int, int, int, int]) -> tuple[int, int]:
+    return box[0], (box[1] + box[3]) // 2
+
+
+def _box_right_center(box: tuple[int, int, int, int]) -> tuple[int, int]:
+    return box[2], (box[1] + box[3]) // 2
+
+
+def _box_top_center(box: tuple[int, int, int, int]) -> tuple[int, int]:
+    return (box[0] + box[2]) // 2, box[1]
+
+
+def _box_bottom_center(box: tuple[int, int, int, int]) -> tuple[int, int]:
+    return (box[0] + box[2]) // 2, box[3]
+
+
+def _draw_arrow(
+    draw: ImageDraw.ImageDraw,
+    points: list[tuple[int, int]],
+    fill: tuple[int, int, int],
+    width: int = 5,
+    arrow_size: int = 14,
+) -> None:
+    if len(points) < 2:
+        return
+
+    try:
+        draw.line(points, fill=fill, width=width, joint="curve")
+    except TypeError:
+        draw.line(points, fill=fill, width=width)
+
+    end_x, end_y = points[-1]
+    start_x, start_y = points[-2]
+    angle = math.atan2(end_y - start_y, end_x - start_x)
+    left_angle = angle + math.pi * 0.82
+    right_angle = angle - math.pi * 0.82
+    draw.polygon(
+        (
+            (end_x, end_y),
+            (end_x + math.cos(left_angle) * arrow_size, end_y + math.sin(left_angle) * arrow_size),
+            (end_x + math.cos(right_angle) * arrow_size, end_y + math.sin(right_angle) * arrow_size),
+        ),
+        fill=fill,
+    )
+
+
+def _draw_stage_card(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    title: str,
+    panel_fill: tuple[int, int, int],
+    accent_fill: tuple[int, int, int],
+    outline: tuple[int, int, int],
+    text_fill: tuple[int, int, int],
+    font: Any,
+) -> None:
+    draw.rounded_rectangle(box, radius=24, fill=panel_fill, outline=outline, width=3)
+    pill_box = (box[0] + 18, box[1] + 18, box[2] - 18, box[1] + 64)
+    draw.rounded_rectangle(pill_box, radius=18, fill=accent_fill, outline=outline, width=2)
+    _draw_centered_text(draw, pill_box, title, text_fill, font=font)
+
+
+def _draw_pipeline_node(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    label: str,
+    fill: tuple[int, int, int],
+    outline: tuple[int, int, int],
+    text_fill: tuple[int, int, int],
+    font: Any,
+) -> None:
+    draw.rounded_rectangle(box, radius=18, fill=fill, outline=outline, width=3)
+    _draw_centered_text(draw, (box[0] + 14, box[1] + 10, box[2] - 14, box[3] - 10), label, text_fill, font=font)
+
+
+def _create_o3_pipeline_image_legacy(path: Path) -> None:
     """Generate the PDF-required O3 pipeline diagram."""
 
-    canvas = Image.new("RGB", (1500, 520), "white")
+    canvas = Image.new("RGB", (2160, 1120), "white")
     draw = ImageDraw.Draw(canvas)
-    draw.rectangle((0, 0, 1499, 519), outline=(210, 210, 210), width=2)
-    draw.text((36, 28), "O3 Stereo Depth Estimation Pipeline using SIFT Features", fill=(20, 20, 20))
-    boxes = [
-        (40, 130, 235, 300, "Input stereo\nim0.png + im1.png"),
-        (290, 130, 485, 300, "Manual SIFT\nkeypoints + descriptors"),
-        (540, 130, 735, 300, "Ratio / mutual /\nstereo geometry filtering"),
-        (790, 130, 985, 300, "SIFT seed\ndisparity prior"),
-        (1040, 130, 1235, 300, "Census-gradient\nSGM cost volume"),
-        (1290, 130, 1460, 300, "LR consistency +\nlocal support cleanup"),
-    ]
-    for left, top, right, bottom, label in boxes:
-        draw.rounded_rectangle((left, top, right, bottom), radius=10, fill=(238, 246, 255), outline=(55, 95, 145), width=3)
-        _draw_centered_text(draw, (left + 12, top + 12, right - 12, bottom - 12), label, (25, 55, 85))
-    for index in range(len(boxes) - 1):
-        start_x = boxes[index][2] + 12
-        end_x = boxes[index + 1][0] - 12
-        y = 215
-        draw.line((start_x, y, end_x, y), fill=(45, 80, 125), width=4)
-        draw.polygon(((end_x, y), (end_x - 13, y - 8), (end_x - 13, y + 8)), fill=(45, 80, 125))
-    draw.text((40, 370), "Outputs:", fill=(20, 20, 20))
-    draw.text((40, 400), "results/O3a_disparity/dep_pipeline.jpg", fill=(40, 40, 40))
-    draw.text((40, 426), "results/O3b_disparity/example_1.jpg ... example_3.jpg", fill=(40, 40, 40))
-    draw.text((40, 452), "results/O3c_disparity/disparity.csv", fill=(40, 40, 40))
+    draw.rectangle((0, 0, 2159, 1119), outline=(210, 210, 210), width=2)
+
+    title_font = _load_pipeline_font(34, bold=True)
+    subtitle_font = _load_pipeline_font(20)
+    stage_font = _load_pipeline_font(21, bold=True)
+    node_font = _load_pipeline_font(19)
+    caption_font = _load_pipeline_font(18)
+
+    draw.text((42, 28), "O3 Stereo Depth Estimation Pipeline", fill=(20, 20, 20), font=title_font)
+    draw.text(
+        (42, 76),
+        "Optimized stage view: Input, Calibration & Bounds, Sparse Prior, Dense Matching, Post-processing, Output",
+        fill=(82, 82, 82),
+        font=subtitle_font,
+    )
+
+    stage_styles = {
+        "input": {
+            "panel": (244, 248, 255),
+            "accent": (234, 243, 255),
+            "node": (234, 243, 255),
+            "outline": (90, 120, 184),
+            "text": (31, 54, 92),
+        },
+        "calib": {
+            "panel": (255, 249, 239),
+            "accent": (255, 242, 226),
+            "node": (255, 242, 226),
+            "outline": (190, 136, 74),
+            "text": (119, 70, 26),
+        },
+        "sparse": {
+            "panel": (245, 250, 242),
+            "accent": (237, 246, 234),
+            "node": (237, 246, 234),
+            "outline": (94, 155, 99),
+            "text": (36, 75, 39),
+        },
+        "dense": {
+            "panel": (248, 244, 255),
+            "accent": (242, 235, 255),
+            "node": (242, 235, 255),
+            "outline": (131, 97, 176),
+            "text": (77, 51, 117),
+        },
+        "post": {
+            "panel": (255, 245, 245),
+            "accent": (255, 234, 234),
+            "node": (255, 234, 234),
+            "outline": (191, 102, 112),
+            "text": (125, 45, 54),
+        },
+        "output": {
+            "panel": (243, 249, 247),
+            "accent": (237, 247, 244),
+            "node": (237, 247, 244),
+            "outline": (76, 140, 121),
+            "text": (32, 85, 69),
+        },
+    }
+
+    group_boxes = {
+        "input": (28, 132, 332, 1038),
+        "calib": (382, 132, 686, 1038),
+        "sparse": (736, 132, 1040, 1038),
+        "dense": (1090, 132, 1394, 1038),
+        "post": (1444, 132, 1748, 1038),
+        "output": (1798, 132, 2102, 1038),
+    }
+    group_titles = {
+        "input": "Input",
+        "calib": "Calibration & Bounds",
+        "sparse": "Sparse Prior",
+        "dense": "Dense Matching",
+        "post": "Post-processing",
+        "output": "Output",
+    }
+
+    for stage_name, group_box in group_boxes.items():
+        style = stage_styles[stage_name]
+        _draw_stage_card(
+            draw,
+            group_box,
+            group_titles[stage_name],
+            style["panel"],
+            style["accent"],
+            style["outline"],
+            style["text"],
+            stage_font,
+        )
+
+    nodes = {
+        "stereo": {"box": (56, 228, 304, 320), "label": "Middlebury\nstereo pair", "stage": "input"},
+        "load_gray": {"box": (56, 380, 304, 472), "label": "Load im0.png /\nim1.png as grayscale", "stage": "input"},
+        "read_calib": {"box": (410, 228, 658, 320), "label": "Read calib +\ndisparity hints", "stage": "calib"},
+        "bounds": {"box": (410, 380, 658, 472), "label": "Scene-adaptive\ndisparity bounds", "stage": "calib"},
+        "sift": {"box": (764, 190, 1012, 282), "label": "Manual SIFT on\nleft and right", "stage": "sparse"},
+        "ratio": {"box": (764, 334, 1012, 426), "label": "Descriptor KNN +\nratio test", "stage": "sparse"},
+        "geometry": {"box": (764, 478, 1012, 570), "label": "Mutual + stereo\ngeometry filtering", "stage": "sparse"},
+        "seed": {"box": (764, 622, 1012, 714), "label": "Sparse SIFT\ndisparity seed prior", "stage": "sparse"},
+        "cost": {"box": (1118, 260, 1366, 352), "label": "Census + gradient\ncost volume", "stage": "dense"},
+        "sgm": {"box": (1118, 404, 1366, 496), "label": "Four-direction\nSGM aggregation", "stage": "dense"},
+        "solve": {"box": (1118, 548, 1366, 640), "label": "Left / right\ndisparity solve", "stage": "dense"},
+        "lr": {"box": (1472, 190, 1720, 282), "label": "LR consistency +\nconfidence margin", "stage": "post"},
+        "support": {"box": (1472, 334, 1720, 426), "label": "Local disparity\nsupport mask", "stage": "post"},
+        "speckle": {"box": (1472, 478, 1720, 570), "label": "Speckle\nremoval", "stage": "post"},
+        "median": {"box": (1472, 622, 1720, 714), "label": "Median + joint\nweighted median", "stage": "post"},
+        "gap": {"box": (1472, 766, 1720, 858), "label": "Short horizontal /\nvertical gap fill", "stage": "post"},
+        "final": {"box": (1826, 260, 2074, 352), "label": "Final dense\ndisparity", "stage": "output"},
+        "pfm": {"box": (1826, 404, 2074, 496), "label": "results/O3b_disparity\n<scene>/disp0.pfm", "stage": "output"},
+        "preview": {"box": (1826, 548, 2074, 640), "label": "results/O3b_disparity\n<scene>/disp0.png", "stage": "output"},
+        "metrics": {"box": (1826, 692, 2074, 784), "label": "results/O3c_disparity\nmetrics.csv", "stage": "output"},
+    }
+
+    for node in nodes.values():
+        style = stage_styles[node["stage"]]
+        _draw_pipeline_node(draw, node["box"], node["label"], style["node"], style["outline"], style["text"], node_font)
+
+    arrow_fill = (70, 86, 104)
+    _draw_arrow(draw, [_box_bottom_center(nodes["stereo"]["box"]), _box_top_center(nodes["load_gray"]["box"])], arrow_fill)
+    _draw_arrow(draw, [_box_right_center(nodes["stereo"]["box"]), _box_left_center(nodes["read_calib"]["box"])], arrow_fill)
+    _draw_arrow(draw, [_box_bottom_center(nodes["read_calib"]["box"]), _box_top_center(nodes["bounds"]["box"])], arrow_fill)
+    _draw_arrow(
+        draw,
+        [
+            _box_right_center(nodes["load_gray"]["box"]),
+            (722, _box_right_center(nodes["load_gray"]["box"])[1]),
+            (722, _box_left_center(nodes["sift"]["box"])[1]),
+            _box_left_center(nodes["sift"]["box"]),
+        ],
+        arrow_fill,
+    )
+    _draw_arrow(draw, [_box_bottom_center(nodes["sift"]["box"]), _box_top_center(nodes["ratio"]["box"])], arrow_fill)
+    _draw_arrow(draw, [_box_bottom_center(nodes["ratio"]["box"]), _box_top_center(nodes["geometry"]["box"])], arrow_fill)
+    _draw_arrow(draw, [_box_bottom_center(nodes["geometry"]["box"]), _box_top_center(nodes["seed"]["box"])], arrow_fill)
+    _draw_arrow(
+        draw,
+        [
+            _box_right_center(nodes["load_gray"]["box"]),
+            (332, 508),
+            (1060, 508),
+            (1060, _box_top_center(nodes["cost"]["box"])[1]),
+            _box_top_center(nodes["cost"]["box"]),
+        ],
+        arrow_fill,
+    )
+    _draw_arrow(
+        draw,
+        [
+            _box_right_center(nodes["bounds"]["box"]),
+            (1084, _box_right_center(nodes["bounds"]["box"])[1]),
+            (1084, _box_left_center(nodes["cost"]["box"])[1]),
+            _box_left_center(nodes["cost"]["box"]),
+        ],
+        arrow_fill,
+    )
+    _draw_arrow(
+        draw,
+        [
+            _box_right_center(nodes["seed"]["box"]),
+            (1098, _box_right_center(nodes["seed"]["box"])[1]),
+            (1098, _box_left_center(nodes["cost"]["box"])[1]),
+            _box_left_center(nodes["cost"]["box"]),
+        ],
+        arrow_fill,
+    )
+    _draw_arrow(draw, [_box_bottom_center(nodes["cost"]["box"]), _box_top_center(nodes["sgm"]["box"])], arrow_fill)
+    _draw_arrow(draw, [_box_bottom_center(nodes["sgm"]["box"]), _box_top_center(nodes["solve"]["box"])], arrow_fill)
+    _draw_arrow(
+        draw,
+        [
+            _box_right_center(nodes["solve"]["box"]),
+            (1426, _box_right_center(nodes["solve"]["box"])[1]),
+            (1426, _box_left_center(nodes["lr"]["box"])[1]),
+            _box_left_center(nodes["lr"]["box"]),
+        ],
+        arrow_fill,
+    )
+    _draw_arrow(draw, [_box_bottom_center(nodes["lr"]["box"]), _box_top_center(nodes["support"]["box"])], arrow_fill)
+    _draw_arrow(draw, [_box_bottom_center(nodes["support"]["box"]), _box_top_center(nodes["speckle"]["box"])], arrow_fill)
+    _draw_arrow(draw, [_box_bottom_center(nodes["speckle"]["box"]), _box_top_center(nodes["median"]["box"])], arrow_fill)
+    _draw_arrow(draw, [_box_bottom_center(nodes["median"]["box"]), _box_top_center(nodes["gap"]["box"])], arrow_fill)
+    _draw_arrow(
+        draw,
+        [
+            _box_right_center(nodes["gap"]["box"]),
+            (1782, _box_right_center(nodes["gap"]["box"])[1]),
+            (1782, _box_left_center(nodes["final"]["box"])[1]),
+            _box_left_center(nodes["final"]["box"]),
+        ],
+        arrow_fill,
+    )
+    _draw_arrow(draw, [_box_bottom_center(nodes["final"]["box"]), _box_top_center(nodes["pfm"]["box"])], arrow_fill)
+    _draw_arrow(
+        draw,
+        [
+            _box_right_center(nodes["final"]["box"]),
+            (2110, _box_right_center(nodes["final"]["box"])[1]),
+            (2110, 528),
+            (1950, 528),
+            _box_top_center(nodes["preview"]["box"]),
+        ],
+        arrow_fill,
+    )
+    _draw_arrow(
+        draw,
+        [
+            _box_right_center(nodes["final"]["box"]),
+            (2130, _box_right_center(nodes["final"]["box"])[1]),
+            (2130, 672),
+            (1950, 672),
+            _box_top_center(nodes["metrics"]["box"]),
+        ],
+        arrow_fill,
+    )
+
+    draw.text(
+        (42, 1066),
+        "Class colors match the architecture markdown: Input, Calibration & Bounds, Sparse Prior, Dense Matching, Post-processing, Output.",
+        fill=(86, 86, 86),
+        font=caption_font,
+    )
     write_jpeg(path, np.asarray(canvas, dtype=np.uint8))
+
+
+from o3_PiplineDrawer import create_o3_pipeline_image
 
 
 def _resize_for_example(image: Image.Image, target_height: int) -> Image.Image:

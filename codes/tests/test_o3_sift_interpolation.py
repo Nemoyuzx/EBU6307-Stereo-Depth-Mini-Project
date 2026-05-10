@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -15,6 +17,7 @@ if str(CODES_DIR) not in sys.path:
 from config import O3Config
 from o3 import (
     add_sift_boundary_support_points,
+    create_o3_pipeline_image,
     filter_sift_seed_outliers,
     inpaint_triangulated_disparity_holes,
     triangulate_sift_seed_disparity,
@@ -48,6 +51,17 @@ def _test_o3_config() -> O3Config:
 
 
 class O3SiftInterpolationTests(unittest.TestCase):
+    def test_create_o3_pipeline_image_writes_expected_canvas(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "dep_pipeline.jpg"
+
+            create_o3_pipeline_image(output_path)
+
+            self.assertTrue(output_path.exists())
+            with Image.open(output_path) as image:
+                self.assertEqual(image.size, (6144, 3414))
+                self.assertEqual(image.mode, "RGB")
+
     def test_filter_sift_seed_outliers_removes_gross_local_mismatch(self) -> None:
         seeds = np.zeros((32, 32), dtype=np.float32)
         seed_mask = np.zeros_like(seeds, dtype=bool)
