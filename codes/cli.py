@@ -178,6 +178,7 @@ def main() -> int:
             args.max_scenes,
             args.dry_run,
             args.scene_name,
+            o3_config=config.o3,
         )
 
     return o1.run(config.o1, args.max_scenes, args.dry_run, args.scene_name)

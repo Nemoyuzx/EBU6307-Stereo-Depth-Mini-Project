@@ -5,6 +5,9 @@ from pathlib import Path
 from typing import Any
 
 
+MIDDLEBURY_PROBE_SCENES = ("artroom1", "ladder1", "skates1")
+
+
 @dataclass(frozen=True)
 class O1Config:
     repo_root: Path
@@ -189,8 +192,8 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
     patch_size = max(1, int(o4_block.get("patch_size", 2)))
     max_disparity = max(1, int(o4_block.get("max_disparity", 288)))
     min_disparity = max(0, int(o4_block.get("min_disparity", 0)))
-    min_confidence = max(0.0, float(o4_block.get("min_confidence", 0.005)))
-    token_median_filter_size = max(1, int(o4_block.get("token_median_filter_size", 5)))
+    min_confidence = max(0.0, float(o4_block.get("min_confidence", 0.02)))
+    token_median_filter_size = max(1, int(o4_block.get("token_median_filter_size", 3)))
     if token_median_filter_size % 2 == 0:
         token_median_filter_size += 1
     backend = str(o4_block.get("backend", "auto")).strip().lower() or "auto"
@@ -219,9 +222,9 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
     if disparity_regression not in {"quadratic", "soft_argmax"}:
         raise ValueError("o4.disparity_regression must be one of: quadratic, soft_argmax")
     softmax_temperature = max(1e-3, float(o4_block.get("softmax_temperature", 1.0)))
-    training_epochs = max(0, int(o4_block.get("training_epochs", 90)))
+    training_epochs = max(0, int(o4_block.get("training_epochs", 72)))
     training_learning_rate = max(1e-5, float(o4_block.get("training_learning_rate", 5e-4)))
-    training_batch_size = max(32, int(o4_block.get("training_batch_size", 1536)))
+    training_batch_size = max(32, int(o4_block.get("training_batch_size", 512)))
     inference_batch_size = max(32, int(o4_block.get("inference_batch_size", 4096)))
     negative_samples = max(1, int(o4_block.get("negative_samples", 12)))
     max_training_samples = max(128, int(o4_block.get("max_training_samples", 60000)))
@@ -231,12 +234,12 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
         context_window_size += 1
     fine_detail_weight = max(0.0, float(o4_block.get("fine_detail_weight", 0.0)))
     consistency_threshold = max(0.0, float(o4_block.get("consistency_threshold", 1.0)))
-    o4_fill_invalid_passes = max(0, int(o4_block.get("fill_invalid_passes", 4)))
-    speckle_max_size = max(0, int(o4_block.get("speckle_max_size", 100)))
-    speckle_max_diff = max(0.0, float(o4_block.get("speckle_max_diff", 1.5)))
+    o4_fill_invalid_passes = max(0, int(o4_block.get("fill_invalid_passes", 2)))
+    speckle_max_size = max(0, int(o4_block.get("speckle_max_size", 150)))
+    speckle_max_diff = max(0.0, float(o4_block.get("speckle_max_diff", 1.0)))
     random_seed = int(o4_block.get("random_seed", 0))
 
-    middlebury_root = resolve_path(repo_root, middlebury_value)
+    middlebury_root = resolve_middlebury_root(repo_root, str(middlebury_value))
     return AppConfig(
         repo_root=repo_root,
         middlebury_root=middlebury_root,
@@ -337,6 +340,47 @@ def resolve_path(repo_root: Path, value: str) -> Path:
     if not path.is_absolute():
         path = repo_root / path
     return path
+
+
+def resolve_middlebury_root(repo_root: Path, value: str) -> Path:
+    """解析 Middlebury 根目录，并兼容学校平台的共享数据集挂载位置。"""
+
+    configured_root = resolve_path(repo_root, value)
+    if is_middlebury_scene_root(configured_root):
+        return configured_root
+
+    if repo_root.name != "nemo-work":
+        return configured_root
+
+    for candidate in school_middlebury_candidates(repo_root):
+        if is_middlebury_scene_root(candidate):
+            return candidate
+    return configured_root
+
+
+def school_middlebury_candidates(repo_root: Path) -> list[Path]:
+    candidates = [
+        repo_root.parent / "visual-computing-shared" / "MiddleburyDataset" / "data",
+        Path("~/visual-computing-shared/MiddleburyDataset/data").expanduser(),
+    ]
+    unique_candidates: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_candidates.append(candidate)
+    return unique_candidates
+
+
+def is_middlebury_scene_root(path: Path) -> bool:
+    if not path.exists() or not path.is_dir():
+        return False
+    return any(
+        (path / scene_name / "im0.png").exists() and (path / scene_name / "im1.png").exists()
+        for scene_name in MIDDLEBURY_PROBE_SCENES
+    )
 
 
 def parse_simple_yaml(text: str) -> dict[str, Any]:

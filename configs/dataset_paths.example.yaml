@@ -62,10 +62,11 @@ o4:
   num_folds: 5
   downsample_factor: 1
   patch_size: 2
+  # Non-adaptive fallback; baseline_sgm uses per-scene O3 calib hints when available.
   max_disparity: 288
   min_disparity: 0
-  min_confidence: 0.005
-  token_median_filter_size: 5
+  min_confidence: 0.02
+  token_median_filter_size: 3
   backend: auto
   # Use GPU 0 on the remote/school CUDA machine.
   device: cuda:0
@@ -82,9 +83,9 @@ o4:
   encoder_layers: 4
   disparity_regression: quadratic
   softmax_temperature: 1.0
-  training_epochs: 90
+  training_epochs: 72
   training_learning_rate: 0.0005
-  training_batch_size: 1536
+  training_batch_size: 512
   inference_batch_size: 4096
   negative_samples: 12
   max_training_samples: 60000
@@ -92,9 +93,9 @@ o4:
   context_window_size: 3
   fine_detail_weight: 0.0
   consistency_threshold: 1.0
-  fill_invalid_passes: 4
-  speckle_max_size: 100
-  speckle_max_diff: 1.5
+  fill_invalid_passes: 2
+  speckle_max_size: 150
+  speckle_max_diff: 1.0
   random_seed: 0
 
 # Recommended O4 local DINOv2 base candidate:
