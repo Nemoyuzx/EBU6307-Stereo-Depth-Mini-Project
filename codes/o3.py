@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
 from collections import deque
 from dataclasses import replace
@@ -12,6 +13,8 @@ import numpy as np
 from PIL import Image, ImageDraw
 from scipy import ndimage
 from scipy.spatial import Delaunay, QhullError, cKDTree
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 try:
     import torch
@@ -973,6 +976,29 @@ def estimate_sgm_penalties(cost_volume: Any) -> tuple[float, float]:
 _O3_TORCH_FALLBACK_REPORTED = False
 
 
+def clear_o3_torch_cache(device: str | None = None) -> None:
+    if torch is None or not torch.cuda.is_available():
+        return
+    if device is not None and not str(device).startswith("cuda"):
+        return
+    torch.cuda.empty_cache()
+
+
+def _read_env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def select_o3_torch_cost_dtype(height: int, width: int, disparity_count: int, device: str) -> Any:
+    if not str(device).startswith("cuda"):
+        return torch.float32
+    fp32_gib = (int(height) * int(width) * int(disparity_count) * 4) / float(1024**3)
+    fp16_threshold_gib = max(0.0, _read_env_float("O3_TORCH_FP16_VOLUME_GIB", 1.0))
+    return torch.float16 if fp32_gib >= fp16_threshold_gib else torch.float32
+
+
 def resolve_o3_torch_device() -> str | None:
     """Return a CUDA device for O3 SGM acceleration when PyTorch is available."""
 
@@ -1066,50 +1092,64 @@ def build_matching_cost_volume_torch(
         int(left.shape[1]) - 1,
     )
     upper_bound = max(lower_bound, upper_bound)
-    costs = []
-    for disparity in range(lower_bound, upper_bound + 1):
-        costs.append(
-            compute_pixel_matching_cost_torch(
-                left,
-                right,
-                left_gradient,
-                right_gradient,
-                config,
-                disparity,
-                target_direction,
-            )
+    disparity_count = upper_bound - lower_bound + 1
+    cost_dtype = select_o3_torch_cost_dtype(int(left.shape[0]), int(left.shape[1]), disparity_count, device)
+    volume = torch.empty((int(left.shape[0]), int(left.shape[1]), disparity_count), dtype=cost_dtype, device=device)
+    for volume_index, disparity in enumerate(range(lower_bound, upper_bound + 1)):
+        cost = compute_pixel_matching_cost_torch(
+            left,
+            right,
+            left_gradient,
+            right_gradient,
+            config,
+            disparity,
+            target_direction,
         )
-    return torch.stack(costs, dim=2)
+        volume[:, :, volume_index].copy_(cost.to(dtype=cost_dtype))
+        del cost
+    return volume
 
 
 def normalize_cost_volume_torch(cost_volume: Any) -> Any:
-    finite = torch.isfinite(cost_volume)
-    if not bool(finite.any().detach().cpu().item()):
+    finite_sample = sample_torch_values_for_quantile(cost_volume, finite_only=True)
+    if int(finite_sample.numel()) == 0:
         return torch.zeros_like(cost_volume, dtype=torch.float32)
-    finite_values = cost_volume[finite]
-    finite_sample = sample_torch_values_for_quantile(finite_values)
-    high_cost = torch.quantile(finite_sample, 0.99)
+    high_cost = torch.quantile(finite_sample.to(dtype=torch.float32), 0.99)
     replacement = high_cost + torch.clamp(torch.abs(high_cost) * 0.25, min=1.0)
-    normalized = torch.where(finite, cost_volume, replacement).to(dtype=torch.float32)
-    normalized = normalized - normalized.min(dim=2, keepdim=True).values
-    return normalized.to(dtype=torch.float32)
+    replacement_value = float(replacement.detach().cpu().item())
+    if hasattr(cost_volume, "nan_to_num_"):
+        cost_volume.nan_to_num_(nan=replacement_value, posinf=replacement_value, neginf=0.0)
+    else:
+        cost_volume[~torch.isfinite(cost_volume)] = replacement_value
+    cost_volume.sub_(cost_volume.amin(dim=2, keepdim=True))
+    return cost_volume
 
 
-def sample_torch_values_for_quantile(values: Any, max_samples: int = 1_000_000) -> Any:
+def sample_torch_values_for_quantile(
+    values: Any,
+    max_samples: int = 1_000_000,
+    *,
+    finite_only: bool = False,
+    positive_only: bool = False,
+) -> Any:
     sample = values.reshape(-1)
     count = int(sample.numel())
-    if count <= max_samples:
-        return sample
-    step = max(1, int(np.ceil(count / max_samples)))
-    return sample[::step]
+    if count > max_samples:
+        step = max(1, int(np.ceil(count / max_samples)))
+        sample = sample[::step]
+    if finite_only or positive_only:
+        sample_mask = torch.isfinite(sample)
+        if positive_only:
+            sample_mask = sample_mask & (sample > 0)
+        sample = sample[sample_mask]
+    return sample
 
 
 def estimate_sgm_penalties_torch(cost_volume: Any) -> tuple[float, float]:
-    positive = cost_volume[torch_isfinite_positive(cost_volume)]
-    if int(positive.numel()) == 0:
+    positive_sample = sample_torch_values_for_quantile(cost_volume, finite_only=True, positive_only=True)
+    if int(positive_sample.numel()) == 0:
         return 1.0, 8.0
-    positive_sample = sample_torch_values_for_quantile(positive)
-    scale = float(torch.quantile(positive_sample, 0.60).detach().cpu().item())
+    scale = float(torch.quantile(positive_sample.to(dtype=torch.float32), 0.60).detach().cpu().item())
     p1 = max(1.0, scale * 0.08)
     p2 = max(p1 * 5.0, scale * 0.55)
     return p1, p2
@@ -1119,19 +1159,18 @@ def torch_isfinite_positive(value: Any) -> Any:
     return torch.isfinite(value) & (value > 0)
 
 
-def aggregate_sgm_axis_torch(cost_volume: Any, guide_gray: Any, axis: int, reverse: bool, p1: float, p2: float) -> Any:
-    source = cost_volume.to(dtype=torch.float32)
+def accumulate_sgm_axis_torch(cost_volume: Any, guide_gray: Any, output: Any, axis: int, reverse: bool, p1: float, p2: float) -> None:
+    source = cost_volume
     guide = guide_gray.to(dtype=torch.float32)
     height, width, _ = source.shape
-    aggregated = torch.zeros_like(source)
     infinity = torch.tensor(1e9, dtype=torch.float32, device=source.device)
     edge_scale = torch.tensor(8.0, dtype=torch.float32, device=source.device)
     minimum_jump = torch.tensor(max(float(p1) * 2.0, 1.0), dtype=torch.float32, device=source.device)
 
     if axis == 1:
         first_column = width - 1 if reverse else 0
-        previous = source[:, first_column, :].clone()
-        aggregated[:, first_column, :] = previous
+        previous = source[:, first_column, :].to(dtype=torch.float32)
+        output[:, first_column, :].add_(previous)
         columns = range(first_column - 1, -1, -1) if reverse else range(first_column + 1, width)
         for column_index in columns:
             previous_column = column_index + 1 if reverse else column_index - 1
@@ -1146,14 +1185,14 @@ def aggregate_sgm_axis_torch(cost_volume: Any, guide_gray: Any, axis: int, rever
             from_upper[:, -1] = infinity
             jump_cost = previous_min + adaptive_p2
             transition = torch.minimum(torch.minimum(previous, from_lower), torch.minimum(from_upper, jump_cost))
-            current = source[:, column_index, :] + transition - previous_min
-            aggregated[:, column_index, :] = current
+            current = source[:, column_index, :].to(dtype=torch.float32) + transition - previous_min
+            output[:, column_index, :].add_(current)
             previous = current
-        return aggregated
+        return
 
     first_row = height - 1 if reverse else 0
-    previous = source[first_row, :, :].clone()
-    aggregated[first_row, :, :] = previous
+    previous = source[first_row, :, :].to(dtype=torch.float32)
+    output[first_row, :, :].add_(previous)
     rows = range(first_row - 1, -1, -1) if reverse else range(first_row + 1, height)
     for row_index in rows:
         previous_row = row_index + 1 if reverse else row_index - 1
@@ -1168,9 +1207,14 @@ def aggregate_sgm_axis_torch(cost_volume: Any, guide_gray: Any, axis: int, rever
         from_upper[:, -1] = infinity
         jump_cost = previous_min + adaptive_p2
         transition = torch.minimum(torch.minimum(previous, from_lower), torch.minimum(from_upper, jump_cost))
-        current = source[row_index, :, :] + transition - previous_min
-        aggregated[row_index, :, :] = current
+        current = source[row_index, :, :].to(dtype=torch.float32) + transition - previous_min
+        output[row_index, :, :].add_(current)
         previous = current
+
+
+def aggregate_sgm_axis_torch(cost_volume: Any, guide_gray: Any, axis: int, reverse: bool, p1: float, p2: float) -> Any:
+    aggregated = torch.zeros(cost_volume.shape, dtype=torch.float32, device=cost_volume.device)
+    accumulate_sgm_axis_torch(cost_volume, guide_gray, aggregated, axis=axis, reverse=reverse, p1=p1, p2=p2)
     return aggregated
 
 
@@ -1183,6 +1227,7 @@ def solve_sgm_from_cost_torch(
     p1: float | None = None,
     p2: float | None = None,
     return_numpy: bool = True,
+    destructive: bool = False,
 ) -> tuple[Any, Any]:
     """对外暴露的 SGM 聚合：接受任意像素/网格级代价体并返回亚像素视差。
 
@@ -1195,7 +1240,11 @@ def solve_sgm_from_cost_torch(
         raise RuntimeError("solve_sgm_from_cost_torch requires PyTorch.")
     with torch.no_grad():
         if isinstance(cost_volume, torch.Tensor):
-            cost_tensor = cost_volume.to(device=device, dtype=torch.float32)
+            cost_tensor = cost_volume.to(device=device)
+            if not cost_tensor.is_floating_point():
+                cost_tensor = cost_tensor.to(dtype=torch.float32)
+            if not destructive and cost_tensor.data_ptr() == cost_volume.data_ptr():
+                cost_tensor = cost_tensor.clone()
         else:
             cost_tensor = torch.as_tensor(np.asarray(cost_volume, dtype=np.float32), dtype=torch.float32, device=device)
         cost = normalize_cost_volume_torch(cost_tensor)
@@ -1207,11 +1256,11 @@ def solve_sgm_from_cost_torch(
             reference = reference_gray.to(device=device, dtype=torch.float32)
         else:
             reference = torch.as_tensor(np.asarray(reference_gray, dtype=np.float32), dtype=torch.float32, device=device)
-        aggregated = cost.clone()
-        aggregated = aggregated + aggregate_sgm_axis_torch(cost, reference, axis=1, reverse=False, p1=p1, p2=p2)
-        aggregated = aggregated + aggregate_sgm_axis_torch(cost, reference, axis=1, reverse=True, p1=p1, p2=p2)
-        aggregated = aggregated + aggregate_sgm_axis_torch(cost, reference, axis=0, reverse=False, p1=p1, p2=p2)
-        aggregated = aggregated + aggregate_sgm_axis_torch(cost, reference, axis=0, reverse=True, p1=p1, p2=p2)
+        aggregated = cost.to(dtype=torch.float32).clone()
+        accumulate_sgm_axis_torch(cost, reference, aggregated, axis=1, reverse=False, p1=p1, p2=p2)
+        accumulate_sgm_axis_torch(cost, reference, aggregated, axis=1, reverse=True, p1=p1, p2=p2)
+        accumulate_sgm_axis_torch(cost, reference, aggregated, axis=0, reverse=False, p1=p1, p2=p2)
+        accumulate_sgm_axis_torch(cost, reference, aggregated, axis=0, reverse=True, p1=p1, p2=p2)
 
         best_index = torch.argmin(aggregated, dim=2).to(dtype=torch.int64)
         best = (best_index.to(dtype=torch.float32) + float(max(0, int(min_disparity)))).to(dtype=torch.float32)
@@ -1256,22 +1305,35 @@ def solve_sgm_direction_torch(
             max_disparity=max_disparity,
             device=device,
         )
-        return solve_sgm_from_cost_torch(
+        clear_o3_torch_cache(device)
+        result = solve_sgm_from_cost_torch(
             raw_cost,
             reference_gray,
             min_disparity=min_disparity,
             device=device,
             return_numpy=True,
+            destructive=True,
         )
+        del raw_cost
+        clear_o3_torch_cache(device)
+        return result
 
 
 def aggregate_sgm_axis(cost_volume: Any, guide_gray: Any, axis: int, reverse: bool, p1: float, p2: float) -> Any:
     """沿单一方向执行带图像边缘自适应惩罚的 SGM 动态规划聚合。"""
 
+    aggregated = np.zeros(np.asarray(cost_volume).shape, dtype=np.float32)
+    accumulate_sgm_axis(cost_volume, guide_gray, aggregated, axis=axis, reverse=reverse, p1=p1, p2=p2)
+    return aggregated
+
+
+def accumulate_sgm_axis(cost_volume: Any, guide_gray: Any, output: Any, axis: int, reverse: bool, p1: float, p2: float) -> None:
+    """把单方向 SGM 聚合结果直接累加到输出体，避免额外完整代价体峰值。"""
+
     source = np.asarray(cost_volume, dtype=np.float32)
     guide = np.asarray(guide_gray, dtype=np.float32)
+    aggregated = np.asarray(output, dtype=np.float32)
     height, width, _ = source.shape
-    aggregated = np.zeros_like(source, dtype=np.float32)
     infinity = np.float32(1e9)
     edge_scale = np.float32(8.0)
     minimum_jump = np.float32(max(float(p1) * 2.0, 1.0))
@@ -1279,7 +1341,7 @@ def aggregate_sgm_axis(cost_volume: Any, guide_gray: Any, axis: int, reverse: bo
     if axis == 1:
         first_column = width - 1 if reverse else 0
         previous = source[:, first_column, :].copy()
-        aggregated[:, first_column, :] = previous
+        aggregated[:, first_column, :] += previous
         columns = range(first_column - 1, -1, -1) if reverse else range(first_column + 1, width)
         for column_index in columns:
             previous_column = column_index + 1 if reverse else column_index - 1
@@ -1295,13 +1357,13 @@ def aggregate_sgm_axis(cost_volume: Any, guide_gray: Any, axis: int, reverse: bo
             jump_cost = np.broadcast_to(previous_min + adaptive_p2, previous.shape)
             transition = np.minimum.reduce((previous, from_lower, from_upper, jump_cost))
             current = source[:, column_index, :] + transition - previous_min
-            aggregated[:, column_index, :] = current
+            aggregated[:, column_index, :] += current
             previous = current
-        return aggregated
+        return
 
     first_row = height - 1 if reverse else 0
     previous = source[first_row, :, :].copy()
-    aggregated[first_row, :, :] = previous
+    aggregated[first_row, :, :] += previous
     rows = range(first_row - 1, -1, -1) if reverse else range(first_row + 1, height)
     for row_index in rows:
         previous_row = row_index + 1 if reverse else row_index - 1
@@ -1317,9 +1379,8 @@ def aggregate_sgm_axis(cost_volume: Any, guide_gray: Any, axis: int, reverse: bo
         jump_cost = np.broadcast_to(previous_min + adaptive_p2, previous.shape)
         transition = np.minimum.reduce((previous, from_lower, from_upper, jump_cost))
         current = source[row_index, :, :] + transition - previous_min
-        aggregated[row_index, :, :] = current
+        aggregated[row_index, :, :] += current
         previous = current
-    return aggregated
 
 
 def solve_sgm_direction(
@@ -1346,6 +1407,7 @@ def solve_sgm_direction(
                 device=torch_device,
             )
         except Exception as exc:
+            clear_o3_torch_cache(torch_device)
             if not _O3_TORCH_FALLBACK_REPORTED:
                 print(f"O3 CUDA SGM unavailable, falling back to NumPy SGM: {exc}", file=sys.stderr)
                 _O3_TORCH_FALLBACK_REPORTED = True
@@ -1378,10 +1440,10 @@ def solve_sgm_from_cost(
         p2 = float(est_p2) if p2 is None else float(p2)
     reference = np.asarray(reference_gray, dtype=np.float32)
     aggregated = cost.copy()
-    aggregated += aggregate_sgm_axis(cost, reference, axis=1, reverse=False, p1=p1, p2=p2)
-    aggregated += aggregate_sgm_axis(cost, reference, axis=1, reverse=True, p1=p1, p2=p2)
-    aggregated += aggregate_sgm_axis(cost, reference, axis=0, reverse=False, p1=p1, p2=p2)
-    aggregated += aggregate_sgm_axis(cost, reference, axis=0, reverse=True, p1=p1, p2=p2)
+    accumulate_sgm_axis(cost, reference, aggregated, axis=1, reverse=False, p1=p1, p2=p2)
+    accumulate_sgm_axis(cost, reference, aggregated, axis=1, reverse=True, p1=p1, p2=p2)
+    accumulate_sgm_axis(cost, reference, aggregated, axis=0, reverse=False, p1=p1, p2=p2)
+    accumulate_sgm_axis(cost, reference, aggregated, axis=0, reverse=True, p1=p1, p2=p2)
 
     best_index = np.argmin(aggregated, axis=2).astype(np.int32)
     best = (best_index + max(0, int(min_disparity))).astype(np.float32)
@@ -2287,6 +2349,7 @@ def run(
             f"disparity_range={min_disparity}-{max_disparity}, valid_disparity_pixels={metrics['valid_disparity_pixels']}, "
             f"mae={mae_text}, rmse={rmse_text}, bad_1px={bad_text})"
         )
+        clear_o3_torch_cache()
 
     write_metrics(config.metrics_file, metric_rows)
     write_o3_pdf_assets(config, example_payloads, metric_rows)

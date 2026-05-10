@@ -185,12 +185,12 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
 
     o4_block = raw_config.get("o4", {}) if isinstance(raw_config.get("o4"), dict) else {}
     num_folds = max(1, int(o4_block.get("num_folds", 5)))
-    downsample_factor = max(1, int(o4_block.get("downsample_factor", 2)))
-    patch_size = max(1, int(o4_block.get("patch_size", 4)))
-    max_disparity = max(1, int(o4_block.get("max_disparity", 64)))
+    downsample_factor = max(1, int(o4_block.get("downsample_factor", 1)))
+    patch_size = max(1, int(o4_block.get("patch_size", 2)))
+    max_disparity = max(1, int(o4_block.get("max_disparity", 288)))
     min_disparity = max(0, int(o4_block.get("min_disparity", 0)))
-    min_confidence = max(0.0, float(o4_block.get("min_confidence", 0.02)))
-    token_median_filter_size = max(1, int(o4_block.get("token_median_filter_size", 3)))
+    min_confidence = max(0.0, float(o4_block.get("min_confidence", 0.005)))
+    token_median_filter_size = max(1, int(o4_block.get("token_median_filter_size", 5)))
     if token_median_filter_size % 2 == 0:
         token_median_filter_size += 1
     backend = str(o4_block.get("backend", "auto")).strip().lower() or "auto"
@@ -201,7 +201,7 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
     if device not in {"auto", "cuda", "cpu"} and not explicit_cuda_device:
         device = "auto"
     prefer_cuda = bool(o4_block.get("prefer_cuda", True))
-    execution_mode = str(o4_block.get("execution_mode", "baseline")).strip().lower() or "baseline"
+    execution_mode = str(o4_block.get("execution_mode", "baseline_sgm")).strip().lower() or "baseline_sgm"
     if execution_mode not in {"baseline", "baseline_sgm", "dinov2_cost_volume"}:
         raise ValueError(
             "o4.execution_mode must be one of: baseline, baseline_sgm, dinov2_cost_volume"
@@ -212,28 +212,28 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
     resume_checkpoint_value = o4_block.get("resume_checkpoint_dir")
     dinov2_input_scale = max(1, int(o4_block.get("dinov2_input_scale", 1)))
     from o4_dinov2 import resolve_dinov2_checkpoint_path
-    model_dim = max(4, int(o4_block.get("model_dim", 24)))
-    encoder_hidden_dim = max(model_dim, int(o4_block.get("encoder_hidden_dim", max(64, model_dim * 2))))
-    encoder_layers = max(1, int(o4_block.get("encoder_layers", 2)))
+    model_dim = max(4, int(o4_block.get("model_dim", 96)))
+    encoder_hidden_dim = max(model_dim, int(o4_block.get("encoder_hidden_dim", 384)))
+    encoder_layers = max(1, int(o4_block.get("encoder_layers", 4)))
     disparity_regression = str(o4_block.get("disparity_regression", "quadratic")).strip().lower() or "quadratic"
     if disparity_regression not in {"quadratic", "soft_argmax"}:
         raise ValueError("o4.disparity_regression must be one of: quadratic, soft_argmax")
     softmax_temperature = max(1e-3, float(o4_block.get("softmax_temperature", 1.0)))
-    training_epochs = max(0, int(o4_block.get("training_epochs", 24)))
-    training_learning_rate = max(1e-5, float(o4_block.get("training_learning_rate", 1e-3)))
-    training_batch_size = max(32, int(o4_block.get("training_batch_size", 1024)))
+    training_epochs = max(0, int(o4_block.get("training_epochs", 90)))
+    training_learning_rate = max(1e-5, float(o4_block.get("training_learning_rate", 5e-4)))
+    training_batch_size = max(32, int(o4_block.get("training_batch_size", 1536)))
     inference_batch_size = max(32, int(o4_block.get("inference_batch_size", 4096)))
-    negative_samples = max(1, int(o4_block.get("negative_samples", 6)))
-    max_training_samples = max(128, int(o4_block.get("max_training_samples", 12000)))
-    weight_decay = max(0.0, float(o4_block.get("weight_decay", 1e-4)))
+    negative_samples = max(1, int(o4_block.get("negative_samples", 12)))
+    max_training_samples = max(128, int(o4_block.get("max_training_samples", 60000)))
+    weight_decay = max(0.0, float(o4_block.get("weight_decay", 3e-4)))
     context_window_size = max(1, int(o4_block.get("context_window_size", 3)))
     if context_window_size % 2 == 0:
         context_window_size += 1
-    fine_detail_weight = max(0.0, float(o4_block.get("fine_detail_weight", 0.35)))
+    fine_detail_weight = max(0.0, float(o4_block.get("fine_detail_weight", 0.0)))
     consistency_threshold = max(0.0, float(o4_block.get("consistency_threshold", 1.0)))
-    o4_fill_invalid_passes = max(0, int(o4_block.get("fill_invalid_passes", 2)))
-    speckle_max_size = max(0, int(o4_block.get("speckle_max_size", 0)))
-    speckle_max_diff = max(0.0, float(o4_block.get("speckle_max_diff", 1.0)))
+    o4_fill_invalid_passes = max(0, int(o4_block.get("fill_invalid_passes", 4)))
+    speckle_max_size = max(0, int(o4_block.get("speckle_max_size", 100)))
+    speckle_max_diff = max(0.0, float(o4_block.get("speckle_max_diff", 1.5)))
     random_seed = int(o4_block.get("random_seed", 0))
 
     middlebury_root = resolve_path(repo_root, middlebury_value)

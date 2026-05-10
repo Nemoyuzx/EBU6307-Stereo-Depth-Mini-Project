@@ -172,6 +172,55 @@ def load_o4_model_checkpoint(path: Path, config: O4Config, *, fold: int, device:
     return int(checkpoint.get("sample_count", 0)), int(checkpoint.get("training_epochs", 0)), model_state
 
 
+def o4_config_warnings(config: O4Config, execution_status: O4ExecutionModeStatus) -> list[str]:
+    if execution_status.selected_mode == "dinov2_cost_volume":
+        return []
+
+    warnings: list[str] = []
+    recommended = {
+        "execution_mode": "baseline_sgm",
+        "max_disparity": 288,
+        "model_dim": 96,
+        "encoder_hidden_dim": 384,
+        "encoder_layers": 4,
+        "training_epochs": 90,
+        "training_batch_size": 1536,
+        "negative_samples": 12,
+        "max_training_samples": 60000,
+    }
+    current = {
+        "execution_mode": execution_status.selected_mode,
+        "max_disparity": int(config.max_disparity),
+        "model_dim": int(config.model_dim),
+        "encoder_hidden_dim": int(config.encoder_hidden_dim),
+        "encoder_layers": int(config.encoder_layers),
+        "training_epochs": int(config.training_epochs),
+        "training_batch_size": int(config.training_batch_size),
+        "negative_samples": int(config.negative_samples),
+        "max_training_samples": int(config.max_training_samples),
+    }
+    mismatches = [f"{key}={current[key]!r} expected {value!r}" for key, value in recommended.items() if current[key] != value]
+    if mismatches:
+        warnings.append(
+            "O4 config warning: effective config differs from the current baseline_sgm result config; "
+            "metrics will not be comparable to results/O4c_transformer."
+        )
+        warnings.append("O4 config warning: " + ", ".join(mismatches))
+
+    legacy_like = (
+        execution_status.selected_mode == "baseline"
+        and int(config.max_disparity) <= 96
+        and int(config.model_dim) <= 48
+        and int(config.training_epochs) <= 24
+    )
+    if legacy_like:
+        warnings.append(
+            "O4 config warning: this matches the legacy small baseline seen on the school platform; "
+            "upload the current configs/ directory or run with the current baseline_sgm settings."
+        )
+    return warnings
+
+
 def read_metrics(metrics_file: Path) -> list[MetricRow]:
     """读取 O4 历史指标。"""
     if not metrics_file.exists():
@@ -1053,6 +1102,8 @@ def run(
     )
     print(f"O4 backend status: {backend_status.reason}")
     print(f"O4 execution mode status: {execution_status.reason}")
+    for warning in o4_config_warnings(config, execution_status):
+        print(warning, file=sys.stderr)
     if execution_status.selected_mode == "dinov2_cost_volume":
         print(f"O4 DINOv2 model: {config.dinov2_model_name}")
         print(f"O4 DINOv2 repo path: {config.dinov2_repo_path or '(use current environment)'}")
