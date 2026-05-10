@@ -139,7 +139,9 @@ def export_o2_examples(metrics_csv: Path, count: int = 3) -> list[Path]:
     for index, row in enumerate(selected[:count], start=1):
         scene = row["scene"]
         family = row.get("transform_family", "unknown")
-        kp_dir = RESULTS / "O2a_sift" / scene
+        kp_dir = RESULTS / "O2b_sift" / scene
+        if not (kp_dir / "im0_keypoints.png").exists():
+            kp_dir = RESULTS / "O2a_sift" / scene
         match_dir = RESULTS / "O2b_sift" / scene
         images = [
             Image.open(kp_dir / "im0_keypoints.png").convert("RGB"),

@@ -19,6 +19,7 @@ class O1Config:
 
 @dataclass(frozen=True)
 class O2Config:
+    pipeline_dir: Path
     keypoints_dir: Path
     matches_dir: Path
     metrics_file: Path
@@ -30,6 +31,7 @@ class O2Config:
 
 @dataclass(frozen=True)
 class O3Config:
+    pipeline_dir: Path
     disparity_dir: Path
     analysis_dir: Path
     metrics_file: Path
@@ -54,6 +56,7 @@ class O3Config:
 
 @dataclass(frozen=True)
 class O4Config:
+    pipeline_dir: Path
     disparity_dir: Path
     analysis_dir: Path
     metrics_file: Path
@@ -133,7 +136,8 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
     metrics_value = result_block.get("o1_metrics_file") or result_block.get("o1c_metrics_file") or "results/O1c_synthetic_data/SSIM.csv"
     shift_pixels = int(o1_block.get("shift_pixels", 8))
 
-    keypoints_value = result_block.get("o2a_sift_dir") or "results/O2a_sift"
+    o2_pipeline_value = result_block.get("o2a_sift_dir") or "results/O2a_sift"
+    keypoints_value = result_block.get("o2_keypoints_dir") or result_block.get("o2b_sift_dir") or "results/O2b_sift"
     matches_value = result_block.get("o2b_sift_dir") or "results/O2b_sift"
     o2_metrics_value = result_block.get("o2c_metrics_file") or "results/O2c_sift/metrics.csv"
 
@@ -143,8 +147,9 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
     ratio_test = float(o2_block.get("ratio_test", 0.8))
     max_draw_matches = int(o2_block.get("max_draw_matches", 80))
 
-    disparity_value = result_block.get("o3a_disparity_dir") or "results/O3a_disparity"
-    analysis_value = result_block.get("o3b_disparity_dir") or "results/O3b_disparity"
+    o3_pipeline_value = result_block.get("o3a_disparity_dir") or "results/O3a_disparity"
+    disparity_value = result_block.get("o3_disparity_dir") or result_block.get("o3b_disparity_dir") or "results/O3b_disparity"
+    analysis_value = result_block.get("o3_analysis_dir") or result_block.get("o3b_disparity_dir") or "results/O3b_disparity"
     o3_metrics_value = result_block.get("o3c_metrics_file") or "results/O3c_disparity/metrics.csv"
 
     o3_block = raw_config.get("o3", {}) if isinstance(raw_config.get("o3"), dict) else {}
@@ -181,8 +186,9 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
     consistency_threshold = max(0.0, float(o3_block.get("consistency_threshold", 1.0)))
     o3_fill_invalid_passes = max(0, int(o3_block.get("fill_invalid_passes", 2)))
 
-    o4_disparity_value = result_block.get("o4a_transformer_dir") or "results/O4a_transformer"
-    o4_analysis_value = result_block.get("o4b_transformer_dir") or "results/O4b_transformer"
+    o4_pipeline_value = result_block.get("o4a_transformer_dir") or "results/O4a_transformer"
+    o4_disparity_value = result_block.get("o4_disparity_dir") or result_block.get("o4b_transformer_dir") or "results/O4b_transformer"
+    o4_analysis_value = result_block.get("o4_analysis_dir") or result_block.get("o4b_transformer_dir") or "results/O4b_transformer"
     o4_metrics_value = result_block.get("o4c_metrics_file") or "results/O4c_transformer/metrics.csv"
     o4_fold_metrics_value = result_block.get("o4c_fold_metrics_file") or "results/O4c_transformer/fold_summary.csv"
 
@@ -251,6 +257,7 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
             shift_pixels=shift_pixels,
         ),
         o2=O2Config(
+            pipeline_dir=resolve_path(repo_root, o2_pipeline_value),
             keypoints_dir=resolve_path(repo_root, keypoints_value),
             matches_dir=resolve_path(repo_root, matches_value),
             metrics_file=resolve_path(repo_root, o2_metrics_value),
@@ -260,6 +267,7 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
             max_draw_matches=max_draw_matches,
         ),
         o3=O3Config(
+            pipeline_dir=resolve_path(repo_root, o3_pipeline_value),
             disparity_dir=resolve_path(repo_root, disparity_value),
             analysis_dir=resolve_path(repo_root, analysis_value),
             metrics_file=resolve_path(repo_root, o3_metrics_value),
@@ -282,6 +290,7 @@ def load_config(config_path: Path, profile: str) -> AppConfig:
             fill_invalid_passes=o3_fill_invalid_passes,
         ),
         o4=O4Config(
+            pipeline_dir=resolve_path(repo_root, o4_pipeline_value),
             disparity_dir=resolve_path(repo_root, o4_disparity_value),
             analysis_dir=resolve_path(repo_root, o4_analysis_value),
             metrics_file=resolve_path(repo_root, o4_metrics_value),

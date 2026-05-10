@@ -1089,8 +1089,8 @@ def _repeatable_matches(original_keypoints: Any, transformed_keypoints: Any, rat
 
 def validate_results(keypoints_dir: Path, matches_dir: Path, metrics_file: Path, scene_name: str | None = None) -> int:
     """验证 O2 输出文件是否存在。"""
-    print(f"Validating O2 keypoint directory: {keypoints_dir}")
-    print(f"Validating O2 match directory: {matches_dir}")
+    print(f"Validating O2 keypoint/result directory: {keypoints_dir}")
+    print(f"Validating O2 match/result directory: {matches_dir}")
     print(f"Validating O2 metrics file: {metrics_file}")
 
     if not metrics_file.exists():
@@ -1160,8 +1160,9 @@ def run(
     print(f"Repository root: {repo_root}") # 项目的根目录路径
     print(f"Middlebury root: {middlebury_root}") # Middlebury 数据集的根目录
     print(f"Discovered scenes with im0.png/im1.png: {scenes_count}") # 实际在数据集目录下识别到的有效场景文件夹
-    print(f"O2 keypoint output dir: {config.keypoints_dir}") # 关键点检测结果的输出目录
-    print(f"O2 match output dir: {config.matches_dir}") # 匹配结果的输出目录
+    print(f"O2 pipeline output dir: {config.pipeline_dir}")
+    print(f"O2 result keypoint output dir: {config.keypoints_dir}") # 关键点检测结果的输出目录
+    print(f"O2 result match output dir: {config.matches_dir}") # 匹配结果的输出目录
     print(f"O2 metrics file: {config.metrics_file}") # 所有场景评估指标的 CSV 文件路径
     if scene_name is not None:
         print(f"Scene filter: {scene_name}")
@@ -1210,6 +1211,7 @@ def run(
     # detector 在整个 O2 过程中复用即可，没有必要为每个 scene 单独创建。
     detector = create_sift_detector(config.max_features, config.contrast_threshold)
     # 输出目录确认
+    config.pipeline_dir.mkdir(parents=True, exist_ok=True)
     config.keypoints_dir.mkdir(parents=True, exist_ok=True)
     config.matches_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1298,8 +1300,9 @@ def run(
         cv2.imwrite(str(keypoint_scene_dir / "im1_keypoints.png"), draw_keypoints(transformed_bgr, transformed_keypoints))
         # README 则把“这一 scene 是怎么变出来的、参数是多少、关键点数量是多少”落成文本，
         # 后面回看单个场景时不必再去翻 metrics.csv。
+        keypoint_readme_name = "keypoints_README.txt" if keypoint_scene_dir == match_scene_dir else "README.txt"
         write_scene_text(
-            keypoint_scene_dir / "README.txt",
+            keypoint_scene_dir / keypoint_readme_name,
             [
                 f"scene: {scene_dir.name}",
                 "generator: O2 SIFT repeatability baseline on original image plus random transformation",

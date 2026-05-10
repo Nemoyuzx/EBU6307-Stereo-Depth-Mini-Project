@@ -23,7 +23,8 @@ from o3 import (
 
 def _test_o3_config() -> O3Config:
     return O3Config(
-        disparity_dir=Path("results/O3a_disparity"),
+        pipeline_dir=Path("results/O3a_disparity"),
+        disparity_dir=Path("results/O3b_disparity"),
         analysis_dir=Path("results/O3b_disparity"),
         metrics_file=Path("results/O3c_disparity/metrics.csv"),
         max_features=800,

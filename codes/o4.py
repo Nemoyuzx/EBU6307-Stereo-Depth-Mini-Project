@@ -1211,7 +1211,8 @@ def run(
     print(f"Repository root: {repo_root}")
     print(f"Middlebury root: {middlebury_root}")
     print(f"Discovered scenes with im0.png/im1.png: {discovered_count}")
-    print(f"O4 disparity output dir: {config.disparity_dir}")
+    print(f"O4 pipeline output dir: {config.pipeline_dir}")
+    print(f"O4 result output dir: {config.disparity_dir}")
     print(f"O4 analysis output dir: {config.analysis_dir}")
     print(f"O4 metrics file: {config.metrics_file}")
     print(f"O4 fold metrics file: {config.fold_metrics_file}")
@@ -1288,6 +1289,7 @@ def run(
         return run_dinov2_objective(repo_root, middlebury_root, config, max_scenes, dry_run=False, scene_name=scene_name)
 
     trainable_token_modes = {"baseline", "baseline_sgm"}
+    config.pipeline_dir.mkdir(parents=True, exist_ok=True)
     config.disparity_dir.mkdir(parents=True, exist_ok=True)
     config.analysis_dir.mkdir(parents=True, exist_ok=True)
     use_cuda_o4 = backend_status.use_torch and is_cuda_device_name(backend_status.device)
@@ -2027,8 +2029,9 @@ def run(
         write_png(disparity_scene_dir / "disp0_transformer_raw_filtered.png", filtered_raw_preview)
         disparity_preview = colorize_disparity_depth_map(display_disparity, display_disparity > 0)
         write_png(disparity_scene_dir / "disp0.png", disparity_preview)
+        disparity_readme_name = "disparity_README.txt" if disparity_scene_dir == analysis_scene_dir else "README.txt"
         write_scene_text(
-            disparity_scene_dir / "README.txt",
+            disparity_scene_dir / disparity_readme_name,
             [
                 f"scene: {scene_dir.name}",
                 f"generator: {generator_name}",

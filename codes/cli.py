@@ -136,6 +136,7 @@ def main() -> int:
             )
         if args.objective == "o3":
             return o3.validate_results(
+                config.o3.pipeline_dir,
                 config.o3.disparity_dir,
                 config.o3.analysis_dir,
                 config.o3.metrics_file,

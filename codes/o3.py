@@ -223,7 +223,7 @@ def write_o3_pdf_assets(
 ) -> None:
     """Write the exact O3 files requested by the project PDF."""
 
-    create_o3_pipeline_image(config.disparity_dir / "dep_pipeline.jpg")
+    create_o3_pipeline_image(config.pipeline_dir / "dep_pipeline.jpg")
     write_o3_pdf_disparity_csv(config.metrics_file, metric_rows)
     preferred_scenes = ("artroom1", "ladder1", "pendulum2")
     selected = [scene for scene in preferred_scenes if scene in example_payloads]
@@ -2091,8 +2091,15 @@ def average_pool_gray(image: Any, factor: int) -> Any:
     return np.rint(pooled).astype(np.uint8)
 
 
-def validate_results(disparity_dir: Path, analysis_dir: Path, metrics_file: Path, scene_name: str | None = None) -> int:
+def validate_results(
+    pipeline_dir: Path,
+    disparity_dir: Path,
+    analysis_dir: Path,
+    metrics_file: Path,
+    scene_name: str | None = None,
+) -> int:
     """验证 O3 输出结果文件。"""
+    print(f"Validating O3 pipeline directory: {pipeline_dir}")
     print(f"Validating O3 disparity directory: {disparity_dir}")
     print(f"Validating O3 analysis directory: {analysis_dir}")
     print(f"Validating O3 metrics file: {metrics_file}")
@@ -2116,7 +2123,7 @@ def validate_results(disparity_dir: Path, analysis_dir: Path, metrics_file: Path
     missing_any = False
     if scene_name is None:
         pdf_required_paths = (
-            disparity_dir / "dep_pipeline.jpg",
+            pipeline_dir / "dep_pipeline.jpg",
             analysis_dir / "example_1.jpg",
             analysis_dir / "example_2.jpg",
             analysis_dir / "example_3.jpg",
@@ -2175,7 +2182,8 @@ def run(
     print(f"Repository root: {repo_root}")
     print(f"Middlebury root: {middlebury_root}")
     print(f"Discovered scenes with im0.png/im1.png: {discovered_count}")
-    print(f"O3 disparity output dir: {config.disparity_dir}")
+    print(f"O3 pipeline output dir: {config.pipeline_dir}")
+    print(f"O3 result output dir: {config.disparity_dir}")
     print(f"O3 analysis output dir: {config.analysis_dir}")
     print(f"O3 metrics file: {config.metrics_file}")
     sgm_backend = "torch_cuda" if resolve_o3_torch_device() is not None else "numpy_cpu"
@@ -2224,6 +2232,7 @@ def run(
         print("Dry run requested; no outputs were written.")
         return 0
 
+    config.pipeline_dir.mkdir(parents=True, exist_ok=True)
     config.disparity_dir.mkdir(parents=True, exist_ok=True)
     config.analysis_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2256,8 +2265,9 @@ def run(
         write_pfm(disparity_scene_dir / "disp0.pfm", disparity)
         disparity_preview = colorize_disparity_depth_map(disparity, disparity_mask)
         write_png(disparity_scene_dir / "disp0.png", disparity_preview)
+        disparity_readme_name = "disparity_README.txt" if disparity_scene_dir == analysis_scene_dir else "README.txt"
         write_scene_text(
-            disparity_scene_dir / "README.txt",
+            disparity_scene_dir / disparity_readme_name,
             [
                 f"scene: {scene_dir.name}",
                 f"generator: {generator_name}",
@@ -2356,7 +2366,7 @@ def run(
     example_count = min(3, len(example_payloads))
     print(f"Wrote O3 metrics summary: {config.metrics_file}")
     print(f"Wrote O3 PDF disparity table: {config.metrics_file.parent / 'disparity.csv'}")
-    print(f"Wrote O3 PDF pipeline image: {config.disparity_dir / 'dep_pipeline.jpg'}")
+    print(f"Wrote O3 PDF pipeline image: {config.pipeline_dir / 'dep_pipeline.jpg'}")
     if example_count > 0:
         print(f"Wrote O3 PDF examples: {config.analysis_dir / 'example_1.jpg'} ... {config.analysis_dir / f'example_{example_count}.jpg'}")
     return 0
@@ -2385,6 +2395,7 @@ def run_o3_entry(argv: list[str] | None = None) -> int:
 
     if args.validate_results:
         return validate_results(
+            project_config.o3.pipeline_dir,
             project_config.o3.disparity_dir,
             project_config.o3.analysis_dir,
             project_config.o3.metrics_file,

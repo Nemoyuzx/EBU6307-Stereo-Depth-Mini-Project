@@ -84,13 +84,14 @@ python codes/o1.py --scene-name artroom1 --dry-run
 
 ## 结果目录接口
 
-本轮整理**没有修改** `results/` 的既有输出接口：
-- O1 synthetic scenes: `results/O1b_synthetic_data/`
-- O1 metrics: `results/O1c_synthetic_data/SSIM.csv`
-- O2 outputs: `results/O2a_sift/`, `results/O2b_sift/`, `results/O2c_sift/metrics.csv`
-- O3 outputs: `results/O3a_disparity/dep_pipeline.jpg`, `results/O3b_disparity/example_1.jpg`~`example_3.jpg`, `results/O3c_disparity/disparity.csv`; scene-level `disp0.pfm/png` and `metrics.csv` are retained for validation.
-- O4 outputs: `results/O4a_transformer/`, `results/O4b_transformer/`, `results/O4c_transformer/metrics.csv`
-- O4 fold summary: `results/O4c_transformer/fold_summary.csv`
+`results/` 按 PDF 的 a/b/c 分工整理：
+- `a` folders: pipeline / architecture assets only.
+- `b` folders: scene-level result images, PFM outputs, and visual examples.
+- `c` folders: metric CSV files and model/checkpoint summaries.
+- O1 pipeline: `results/O1a_synthetic_data/`; synthetic scenes: `results/O1b_synthetic_data/`; metrics: `results/O1c_synthetic_data/SSIM.csv`
+- O2 pipeline: `results/O2a_sift/`; keypoint/match examples: `results/O2b_sift/`; metrics: `results/O2c_sift/metrics.csv`
+- O3 pipeline: `results/O3a_disparity/dep_pipeline.jpg`; disparity results/examples: `results/O3b_disparity/`; metrics: `results/O3c_disparity/metrics.csv`
+- O4 pipeline: `results/O4a_transformer/`; disparity/raw/confidence/error results: `results/O4b_transformer/`; metrics and fold summary: `results/O4c_transformer/`
 
 ## 数据与配置
 
