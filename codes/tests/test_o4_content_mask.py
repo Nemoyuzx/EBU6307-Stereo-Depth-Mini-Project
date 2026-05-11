@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 TESTS_DIR = Path(__file__).resolve().parent
 CODES_DIR = TESTS_DIR.parent
@@ -13,6 +15,7 @@ if str(CODES_DIR) not in sys.path:
 
 from o4 import build_o4_content_mask
 from o4_dinov2 import _build_nonblack_content_mask
+from o4_PiplineDrawer import create_o4_pipeline_image
 
 
 class O4ContentMaskTests(unittest.TestCase):
@@ -40,6 +43,17 @@ class O4ContentMaskTests(unittest.TestCase):
         image[5, 4] = 0
 
         self.assertTrue(np.array_equal(build_o4_content_mask(image), _build_nonblack_content_mask(image)))
+
+    def test_create_o4_pipeline_image_writes_expected_canvas(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "transformer_pipeline.jpg"
+
+            create_o4_pipeline_image(output_path)
+
+            self.assertTrue(output_path.exists())
+            with Image.open(output_path) as image:
+                self.assertEqual(image.size, (10924, 3664))
+                self.assertEqual(image.mode, "RGB")
 
 
 if __name__ == "__main__":

@@ -59,6 +59,7 @@ from o4_torch import (
     upsample_token_grid_torch,
 )
 from o4_dinov2 import O4ExecutionModeStatus
+from o4_PiplineDrawer import write_o4_pipeline_assets
 from pfm import read_pfm, write_pfm
 
 
@@ -1292,6 +1293,8 @@ def run(
     config.pipeline_dir.mkdir(parents=True, exist_ok=True)
     config.disparity_dir.mkdir(parents=True, exist_ok=True)
     config.analysis_dir.mkdir(parents=True, exist_ok=True)
+    write_o4_pipeline_assets(config.pipeline_dir)
+    print(f"Wrote O4 PDF pipeline image: {config.pipeline_dir / 'transformer_pipeline.jpg'}")
     use_cuda_o4 = backend_status.use_torch and is_cuda_device_name(backend_status.device)
 
     payload_scene_dirs = (
