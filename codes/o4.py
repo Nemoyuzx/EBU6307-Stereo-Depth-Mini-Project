@@ -1280,6 +1280,10 @@ def run(
         print("Dry run requested; no outputs were written.")
         return 0
 
+    config.pipeline_dir.mkdir(parents=True, exist_ok=True)
+    write_o4_pipeline_assets(config.pipeline_dir)
+    print(f"Wrote O4 PDF pipeline image: {config.pipeline_dir / 'transformer_pipeline.jpg'}")
+
     if not execution_status.available:
         print(f"O4 execution mode unavailable: {execution_status.reason}", file=sys.stderr)
         return 1
@@ -1290,11 +1294,8 @@ def run(
         return run_dinov2_objective(repo_root, middlebury_root, config, max_scenes, dry_run=False, scene_name=scene_name)
 
     trainable_token_modes = {"baseline", "baseline_sgm"}
-    config.pipeline_dir.mkdir(parents=True, exist_ok=True)
     config.disparity_dir.mkdir(parents=True, exist_ok=True)
     config.analysis_dir.mkdir(parents=True, exist_ok=True)
-    write_o4_pipeline_assets(config.pipeline_dir)
-    print(f"Wrote O4 PDF pipeline image: {config.pipeline_dir / 'transformer_pipeline.jpg'}")
     use_cuda_o4 = backend_status.use_torch and is_cuda_device_name(backend_status.device)
 
     payload_scene_dirs = (

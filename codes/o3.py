@@ -2528,6 +2528,7 @@ def run(
     config.pipeline_dir.mkdir(parents=True, exist_ok=True)
     config.disparity_dir.mkdir(parents=True, exist_ok=True)
     config.analysis_dir.mkdir(parents=True, exist_ok=True)
+    create_o3_pipeline_image(config.pipeline_dir / "dep_pipeline.jpg")
 
     metric_rows: list[dict[str, str | int | float]] = []
     example_payloads: dict[str, dict[str, Any]] = {}
