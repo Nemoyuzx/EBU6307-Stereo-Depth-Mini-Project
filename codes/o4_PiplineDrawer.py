@@ -15,6 +15,7 @@ LOGICAL_CANVAS_HEIGHT = 680
 REFERENCE_CANVAS_WIDTH = 2731
 REFERENCE_CANVAS_HEIGHT = 916
 OUTPUT_SCALE = 4
+LINE_WIDTH = 1.35
 
 _QT_APPLICATION: QGuiApplication | None = None
 
@@ -138,7 +139,8 @@ def _draw_group(
     title_y_offset: int = 8,
 ) -> None:
     left, top, right, bottom = box
-    pen = QPen(QColor(*outline), 2)
+    pen = QPen(QColor(*outline))
+    pen.setWidthF(LINE_WIDTH)
     pen.setDashPattern([2.0, 3.0])
     pen.setCapStyle(Qt.RoundCap)
     pen.setJoinStyle(Qt.RoundJoin)
@@ -164,11 +166,13 @@ def _draw_box(
     outline: tuple[int, int, int],
     text_fill: tuple[int, int, int] = (34, 36, 44),
     radius: int = 5,
-    width: int = 2,
+    width: float = LINE_WIDTH,
     title_bold: bool = False,
 ) -> None:
     left, top, right, bottom = box
-    painter.setPen(QPen(QColor(*outline), width))
+    pen = QPen(QColor(*outline))
+    pen.setWidthF(width)
+    painter.setPen(pen)
     painter.setBrush(QBrush(QColor(*fill)))
     painter.drawRoundedRect(QRectF(left, top, right - left, bottom - top), radius, radius)
     text_box = (left + 8, top + 5, right - 8, bottom - 5)
@@ -206,7 +210,7 @@ def _draw_arrow(
     painter: QPainter,
     points: list[tuple[int, int]],
     fill: tuple[int, int, int] = (24, 24, 26),
-    width: int = 2,
+    width: float = LINE_WIDTH,
     arrow_size: int = 6,
     corner_radius: int = 14,
 ) -> None:
@@ -223,7 +227,8 @@ def _draw_arrow(
     else:
         shaft_end = (end_x, end_y)
 
-    pen = QPen(QColor(*fill), width)
+    pen = QPen(QColor(*fill))
+    pen.setWidthF(width)
     pen.setCapStyle(Qt.RoundCap)
     pen.setJoinStyle(Qt.RoundJoin)
     painter.setPen(pen)
@@ -272,12 +277,13 @@ def _draw_line(
     painter: QPainter,
     points: list[tuple[int, int]],
     fill: tuple[int, int, int] = (24, 24, 26),
-    width: int = 2,
+    width: float = LINE_WIDTH,
     corner_radius: int = 14,
 ) -> None:
     if len(points) < 2:
         return
-    pen = QPen(QColor(*fill), width)
+    pen = QPen(QColor(*fill))
+    pen.setWidthF(width)
     pen.setCapStyle(Qt.RoundCap)
     pen.setJoinStyle(Qt.RoundJoin)
     painter.setPen(pen)
@@ -336,7 +342,7 @@ def _draw_line_to_arrow_base(
     painter: QPainter,
     points: list[tuple[int, int]],
     fill: tuple[int, int, int] = (24, 24, 26),
-    width: int = 2,
+    width: float = LINE_WIDTH,
     arrow_size: int = 6,
     corner_radius: int = 14,
 ) -> None:
@@ -423,11 +429,11 @@ def create_o4_pipeline_image(path: Path) -> None:
     black = (34, 36, 44)
 
     _draw_group(painter, (15, 15, 209, 672), "Input", (246, 241, 255), purple, purple, title_font)
-    _draw_group(painter, (231, 15, 659, 672), "Token description construction   (stereo input)", (238, 251, 243), green, green, title_font)
-    _draw_group(painter, (686, 15, 1237, 672), "Stereo Token Transformer", (246, 250, 255), blue, blue, title_font)
+    _draw_group(painter, (234, 15, 662, 672), "Token description construction   (stereo input)", (238, 251, 243), green, green, title_font)
+    _draw_group(painter, (687, 15, 1238, 672), "Stereo Token Transformer", (246, 250, 255), blue, blue, title_font)
     _draw_group(painter, (1263, 15, 1562, 672), "Dense Matching", (255, 249, 229), gold, gold, title_font)
     _draw_group(painter, (1587, 15, 1834, 672), "Post-processing", (255, 246, 246), red, red, title_font)
-    _draw_group(painter, (1861, 15, 2033, 672), "Output", (251, 252, 254), gray, gray, title_font)
+    _draw_group(painter, (1859, 15, 2031, 672), "Output", (251, 252, 254), gray, gray, title_font)
 
     load = (42, 78, 179, 118)
     stereo_pair = (42, 316, 179, 356)
@@ -658,7 +664,7 @@ def create_o4_pipeline_image(path: Path) -> None:
     _draw_arrow(painter, [_right_center(transformer), _left_center(right_embedding_bar)])
     embedding_bus_y = 60
     embedding_merge_y = 136
-    embedding_bus_left_x = 1282
+    embedding_bus_left_x = 1276
     _draw_line_to_arrow_base(
         painter,
         [
@@ -672,7 +678,7 @@ def create_o4_pipeline_image(path: Path) -> None:
     _draw_line_to_arrow_base(
         painter,
         [
-            (_center_x(left_emb), embedding_bus_y),
+            (_center_x(left_emb)-20, embedding_bus_y),
             (_center_x(right_emb), embedding_bus_y),
             _top_center(right_emb),
         ],
@@ -692,10 +698,12 @@ def create_o4_pipeline_image(path: Path) -> None:
     _draw_arrow(painter, [_bottom_center(lr), _top_center(clean)])
     _draw_arrow(painter, [_bottom_center(clean), _top_center(fill)])
     _draw_arrow(painter, [_bottom_center(fill), _top_center(upsample)])
-    _draw_arrow(painter, [_right_center(upsample), (1846, _center_y(upsample)), (1846, _center_y(out1)), _left_center(out1)])
-    _draw_arrow(painter, [_right_center(upsample), (1875, _center_y(upsample)), (1875, _center_y(out2)), _left_center(out2)])
+    _draw_arrow(painter, [_right_center(upsample), (1810, _center_y(upsample)), (1810, _center_y(out1)), _left_center(out1)])
+    _draw_arrow(painter, [_right_center(upsample), (1810, _center_y(upsample)), (1810, _center_y(out2)), _left_center(out2)])
     _draw_arrow(painter, [_right_center(raw), (1875, _center_y(raw)), (1875, _center_y(out3)), _left_center(out3)])
-    _draw_arrow(painter, [_bottom_center(mask), (_center_x(mask), 656), (1318, 656), (1318, _center_y(cost)), _left_center(cost)])
+    _draw_arrow(painter, [_right_center(raw), (1875, _center_y(raw)), (1875, _center_y(out2)), _left_center(out2)])
+    _draw_arrow(painter, [_bottom_center(mask), (_center_x(mask), 656), (1308, 656), (1308, _center_y(cost)), _left_center(cost)])
+    _draw_arrow(painter, [_bottom_center(mask), (_center_x(mask), 656), (_center_x(upsample), 656), _bottom_center(upsample)])
 
     painter.end()
     path.parent.mkdir(parents=True, exist_ok=True)
