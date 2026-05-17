@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -225,6 +226,16 @@ def write_bmp(path: Path, image: Any) -> None:
 def ensure_parent(path: Path) -> None:
     """确保目标路径的父目录存在，避免写文件时报目录不存在错误。"""
     path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def copy_if_exists(source: Path, destination: Path) -> bool:
+    """若源文件存在则复制到目标位置，并返回是否复制成功。"""
+
+    if not source.exists():
+        return False
+    ensure_parent(destination)
+    shutil.copy2(source, destination)
+    return True
 
 
 def write_scene_text(path: Path, lines: list[str]) -> None:

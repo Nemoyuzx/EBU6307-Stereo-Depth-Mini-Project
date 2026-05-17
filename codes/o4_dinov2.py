@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 
 from common import (
+    copy_if_exists,
     content_bbox_from_gray,
     discover_scenes,
     evaluate_disparity,
@@ -88,6 +89,18 @@ _DINO_V2_MODEL_SPECS: dict[str, Dinov2ModelSpec] = {
     selector: spec for spec in _DINO_V2_VARIANTS for selector in spec.selectors
 }
 _DINO_V2_CHECKPOINT_FILENAMES = {spec.checkpoint_filename for spec in _DINO_V2_VARIANTS}
+
+
+def copy_o4_source_images(scene_dir: Path, *output_dirs: Path) -> None:
+    """把源场景的原始左右图复制到 O4 结果目录，便于直接查看或提交。"""
+
+    unique_output_dirs: list[Path] = []
+    for output_dir in output_dirs:
+        if output_dir not in unique_output_dirs:
+            unique_output_dirs.append(output_dir)
+    for output_dir in unique_output_dirs:
+        for image_name in ("im0.png", "im1.png"):
+            copy_if_exists(scene_dir / image_name, output_dir / image_name)
 
 
 def resolve_dinov2_checkpoint_path(model_name: str, checkpoint_path: str | Path | None) -> Path:
@@ -1519,10 +1532,14 @@ def validate_dinov2_results(disparity_dir: Path, analysis_dir: Path, metrics_fil
     for row in rows:
         current_scene = row["scene"]
         required_paths = (
+            disparity_dir / current_scene / "im0.png",
+            disparity_dir / current_scene / "im1.png",
             disparity_dir / current_scene / "disp0.pfm",
             disparity_dir / current_scene / "disp0.png",
             disparity_dir / current_scene / "disp0_transformer_raw.pfm",
             disparity_dir / current_scene / "disp0_transformer_raw.png",
+            analysis_dir / current_scene / "im0.png",
+            analysis_dir / current_scene / "im1.png",
             analysis_dir / current_scene / "confidence.png",
             analysis_dir / current_scene / "error_map.png",
         )
@@ -1690,6 +1707,7 @@ def run_dinov2_objective(
         analysis_scene_dir = config.analysis_dir / scene_dir.name
         disparity_scene_dir.mkdir(parents=True, exist_ok=True)
         analysis_scene_dir.mkdir(parents=True, exist_ok=True)
+        copy_o4_source_images(scene_dir, disparity_scene_dir, analysis_scene_dir)
 
         write_pfm(disparity_scene_dir / "disp0.pfm", disparity)
         write_pfm(disparity_scene_dir / "disp0_transformer_raw.pfm", raw_disparity)
@@ -1734,6 +1752,8 @@ def run_dinov2_objective(
             f"max_token_disparity: {prediction.max_token_disparity}",
             f"resolved_execution_mode: dinov2_cost_volume",
             f"descriptor_source: {status.descriptor_source}",
+            "im0.png: original left image copied from the source scene",
+            "im1.png: original right image copied from the source scene",
             "final_disparity_source: DINOv2 patch-token cost volume with O3-style SGM aggregation",
             f"training_used: {'yes' if adapter_model is not None else 'no'}",
             f"dinov2_adapter_checkpoint: {adapter_paths.get(fold, 'none')}",

@@ -11,6 +11,7 @@ import numpy as np
 from scipy import ndimage
 
 from common import (
+    copy_if_exists,
     content_bbox_from_gray,
     discover_scenes,
     evaluate_disparity,
@@ -65,6 +66,18 @@ from pfm import read_pfm, write_pfm
 
 MetricValue = str | float | int
 MetricRow = dict[str, MetricValue]
+
+
+def copy_o4_source_images(scene_dir: Path, *output_dirs: Path) -> None:
+    """把源场景的原始左右图复制到 O4 结果目录，便于直接查看或提交。"""
+
+    unique_output_dirs: list[Path] = []
+    for output_dir in output_dirs:
+        if output_dir not in unique_output_dirs:
+            unique_output_dirs.append(output_dir)
+    for output_dir in unique_output_dirs:
+        for image_name in ("im0.png", "im1.png"):
+            copy_if_exists(scene_dir / image_name, output_dir / image_name)
 
 
 @dataclass
@@ -1135,12 +1148,16 @@ def validate_results(disparity_dir: Path, analysis_dir: Path, metrics_file: Path
         disparity_scene_dir = disparity_dir / current_scene
         analysis_scene_dir = analysis_dir / current_scene
         required_paths = (
+            disparity_scene_dir / "im0.png",
+            disparity_scene_dir / "im1.png",
             disparity_scene_dir / "disp0.pfm",
             disparity_scene_dir / "disp0.png",
             disparity_scene_dir / "disp0_transformer_raw.pfm",
             disparity_scene_dir / "disp0_transformer_raw.png",
             disparity_scene_dir / "disp0_transformer_raw_filtered.pfm",
             disparity_scene_dir / "disp0_transformer_raw_filtered.png",
+            analysis_scene_dir / "im0.png",
+            analysis_scene_dir / "im1.png",
             analysis_scene_dir / "confidence.png",
             analysis_scene_dir / "error_map.png",
         )
@@ -2012,6 +2029,7 @@ def run(
         analysis_scene_dir = config.analysis_dir / scene_dir.name
         disparity_scene_dir.mkdir(parents=True, exist_ok=True)
         analysis_scene_dir.mkdir(parents=True, exist_ok=True)
+        copy_o4_source_images(scene_dir, disparity_scene_dir, analysis_scene_dir)
 
         estimated_working_set_mb = estimate_o4_working_set_mb(
             left_tokens.shape[0],
@@ -2052,6 +2070,8 @@ def run(
                 f"requested_execution_mode: {config.execution_mode}",
                 f"resolved_execution_mode: {payload['execution_mode']}",
                 f"descriptor_source: {payload['descriptor_source']}",
+                "im0.png: original left image copied from the source scene",
+                "im1.png: original right image copied from the source scene",
                 "final_disparity_source: O4 transformer token prediction",
                 "sgm_detail_fusion_used: no",
                 "raw_transformer_disparity: disp0_transformer_raw.pfm",
@@ -2124,6 +2144,8 @@ def run(
                 f"resolved_backend: {training_state.backend}",
                 f"resolved_execution_mode: {payload['execution_mode']}",
                 f"descriptor_source: {payload['descriptor_source']}",
+                "im0.png: original left image copied from the source scene",
+                "im1.png: original right image copied from the source scene",
                 "final_disparity_source: O4 transformer token prediction",
                 "sgm_detail_fusion_used: no",
                 "official_pfm_selection: o3_style_token_cleanup_from_transformer_sgm_prediction",

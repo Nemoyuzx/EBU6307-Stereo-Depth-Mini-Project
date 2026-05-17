@@ -120,7 +120,7 @@ O4 仍保留两条运行路径：
 - `codes/o4.py`：默认提交路径，只使用作业允许的 pip 依赖。
 - `codes/o4_dinov2.py`：DINOv2 实验/备份路径，直接加载本地 DINOv2 模型和 checkpoint，不训练。
 
-O4 的正式 `disp0.pfm` 由 Transformer/ViT token 视差直接生成，不再融合 O3/SGM 细节视差。每个 O4 场景目录同时写出 `disp0_transformer_raw.pfm` 和 `disp0_transformer_raw.png`，用于核验原始 Transformer/ViT 预测结果；`disp0.png` 只是展示预览。
+O4 的正式 `disp0.pfm` 由 Transformer/ViT token 视差直接生成，不再融合 O3/SGM 细节视差。每个 O4 场景目录同时写出 `im0.png`、`im1.png` 源图副本，以及 `disp0_transformer_raw.pfm` 和 `disp0_transformer_raw.png`，用于核验原始 Transformer/ViT 预测结果；`disp0.png` 只是展示预览。
 
 例如，运行默认 O4 baseline：
 
