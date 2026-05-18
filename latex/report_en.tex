@@ -1,0 +1,864 @@
+% Options for packages loaded elsewhere
+\PassOptionsToPackage{unicode}{hyperref}
+\PassOptionsToPackage{hyphens}{url}
+\documentclass[
+  11pt,
+]{article}
+\usepackage{xcolor}
+\usepackage[margin=2.54cm]{geometry}
+\usepackage{amsmath,amssymb}
+\setcounter{secnumdepth}{-\maxdimen} % remove section numbering
+\usepackage{iftex}
+\ifPDFTeX
+  \usepackage[T1]{fontenc}
+  \usepackage[utf8]{inputenc}
+  \usepackage{textcomp} % provide euro and other symbols
+\else % if luatex or xetex
+  \usepackage{unicode-math} % this also loads fontspec
+  \defaultfontfeatures{Scale=MatchLowercase}
+  \defaultfontfeatures[\rmfamily]{Ligatures=TeX,Scale=1}
+\fi
+\usepackage{lmodern}
+\ifPDFTeX\else
+  % xetex/luatex font selection
+\fi
+% Use upquote if available, for straight quotes in verbatim environments
+\IfFileExists{upquote.sty}{\usepackage{upquote}}{}
+\IfFileExists{microtype.sty}{% use microtype if available
+  \usepackage[]{microtype}
+  \UseMicrotypeSet[protrusion]{basicmath} % disable protrusion for tt fonts
+}{}
+\makeatletter
+\@ifundefined{KOMAClassName}{% if non-KOMA class
+  \IfFileExists{parskip.sty}{%
+    \usepackage{parskip}
+  }{% else
+    \setlength{\parindent}{0pt}
+    \setlength{\parskip}{6pt plus 2pt minus 1pt}}
+}{% if KOMA class
+  \KOMAoptions{parskip=half}}
+\makeatother
+\setlength{\emergencystretch}{3em} % prevent overfull lines
+\providecommand{\tightlist}{%
+  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+\usepackage{graphicx}
+\graphicspath{{../}}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage[table]{xcolor}
+\usepackage{array}
+\usepackage{float}
+\usepackage{bookmark}
+\IfFileExists{xurl.sty}{\usepackage{xurl}}{} % add URL line breaks if available
+\urlstyle{same}
+\hypersetup{
+  hidelinks,
+  pdfcreator={LaTeX via pandoc}}
+
+\author{}
+\date{}
+
+\begin{document}
+
+\section{EBU6307 Stereo Depth Mini Project
+Report}\label{ebu6307-stereo-depth-mini-project-report}
+
+\textbf{Student name:} Zixi Yu\\
+\textbf{Student number:} 231223210\\
+\textbf{Submission package:} EBU6307\_ZIXI\_YU\_231223210
+
+\newsavebox{\exampleleftbox}
+\newcolumntype{L}{>{\raggedright\arraybackslash}X}
+\newcolumntype{C}{>{\centering\arraybackslash}X}
+\newcommand{\theadl}[1]{\multicolumn{1}{l}{\textbf{#1}}}
+\newcommand{\theadc}[1]{\multicolumn{1}{c}{\textbf{#1}}}
+\newcommand{\reportdoubletoprule}{%
+\specialrule{1pt}{0pt}{1pt}%
+\toprule
+}
+\newcommand{\exampletriple}[6]{%
+\begin{center}%
+\sbox{\exampleleftbox}{%
+\begin{minipage}[t]{0.58\linewidth}
+\centering
+\vspace{0pt}
+\includegraphics[width=0.98\linewidth]{#1}\\[-0.2em]
+{\footnotesize #2}
+
+\vspace{0.6em}
+\includegraphics[width=0.98\linewidth]{#3}\\[-0.2em]
+{\footnotesize #4}
+\end{minipage}%
+}%
+\usebox{\exampleleftbox}\hspace{0.015\linewidth}
+\begin{minipage}[t]{0.36\linewidth}
+\centering
+\vspace{0pt}
+\includegraphics[height=\dimexpr\ht\exampleleftbox+\dp\exampleleftbox-2.2em\relax]{#5}\\[-0.2em]
+{\footnotesize #6}
+\end{minipage}
+\end{center}%
+}
+\newcommand{\annotatedexampleimage}[4][\linewidth]{%
+\begin{minipage}[t]{#1}
+\centering
+\includegraphics[width=\linewidth]{#2}\\[-0.2em]
+{\footnotesize #4}
+\end{minipage}
+}
+\newcommand{\exampletriptychrow}[9]{%
+\annotatedexampleimage[0.32\linewidth]{#1}{#2}{#3}\hfill
+\annotatedexampleimage[0.32\linewidth]{#4}{#5}{#6}\hfill
+\annotatedexampleimage[0.32\linewidth]{#7}{#8}{#9}\par
+}
+\newcommand{\appendixpipelinefigure}[1]{%
+\begin{center}
+\includegraphics[angle=90,totalheight=0.9\textheight]{#1}
+\end{center}
+}
+\newcommand{\siftexamplerow}[9]{%
+\begin{minipage}[t]{0.98\linewidth}
+\centering
+\annotatedexampleimage[0.49\linewidth]{#1}{#2}{#3}\hfill
+\annotatedexampleimage[0.49\linewidth]{#4}{#5}{#6}\\[0.45em]
+\annotatedexampleimage[\linewidth]{#7}{#8}{#9}
+\end{minipage}\par
+}
+\newcommand{\siftexamplerowsmall}[9]{%
+\begin{minipage}[t]{0.72\linewidth}
+\centering
+\annotatedexampleimage[0.49\linewidth]{#1}{#2}{#3}\hfill
+\annotatedexampleimage[0.49\linewidth]{#4}{#5}{#6}\\[0.45em]
+\annotatedexampleimage[\linewidth]{#7}{#8}{#9}
+\end{minipage}\par
+}
+
+\subsection{1. Project Overview}\label{project-overview}
+
+This report documents the four objectives required by the EBU6307 Mini
+Project. All evidence in this report is taken directly from the
+submitted package \texttt{EBU6307\_ZIXI\_YU\_231223210}, where the
+implementations are stored in \texttt{codes/} and the deliverables are
+stored in \texttt{results/}. The experiments cover 24 official
+Middlebury scenes and follow the PDF-required structure for each
+objective: pipeline figure, three examples, quantitative evaluation, and
+a short discussion.
+
+The project progresses from classical geometric synthesis to local
+feature engineering, then to dense stereo matching, and finally to a
+lightweight Vision Transformer style stereo model. This organization
+makes it possible to compare how much accuracy and robustness are gained
+by moving from hand-crafted features to learned token descriptors.
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Project objectives and deliverables.} Overview of the four mini-project objectives, their main entry scripts, required result folders, and the core quantitative metric used for evaluation.}
+\label{tab:project_overview_en}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabularx}{\columnwidth}{L C L C}
+\reportdoubletoprule
+\theadl{Objective} & \theadc{Main script} & \theadl{Required result folders} & \theadc{Core metric} \\
+\midrule
+O1 Synthetic stereo generation & \texttt{codes/o1.py} & results/O1a\_*, results/O1b\_*, results/O1c\_* & SSIM \\
+O2 Manual SIFT repeatability & \texttt{codes/o2.py} & results/O2a\_*, results/O2b\_*, results/O2c\_* & Repeatability \\
+O3 SIFT-guided stereo depth & \texttt{codes/o3.py} & results/O3a\_*, results/O3b\_*, results/O3c\_* & MAE / RMSE / Bad-1px \\
+O4 Transformer stereo depth & \texttt{codes/o4.py} & results/O4a\_*, results/O4b\_*, results/O4c\_* & 5-fold CV MAE / RMSE / Bad-1px \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabularx}
+\vspace{1mm}
+\end{table}
+
+\subsection{2. Objective 1: Image Reprojection for Synthetic Stereo
+Generation}\label{objective-1-image-reprojection-for-synthetic-stereo-generation}
+
+\subsubsection{2.1 a. Pipeline Figure}\label{a.-pipeline-figure}
+
+\begin{center}
+\includegraphics[width=\linewidth]{EBU6307_ZIXI_YU_231223210/results/O1a_synthetic_data/syn_pipeline.jpg}
+\end{center}
+
+Objective 1 generates a synthetic right view from the original left
+image and the provided left-view disparity map. The implementation first
+cleans the reference disparity, applies only light smoothing, and then
+forward-projects the left RGB image to a synthetic target view. Because
+closer pixels are projected after farther pixels, the projection
+approximates stereo occlusion ordering instead of simply shifting the
+whole image by a fixed amount. Holes caused by occlusion and discrete
+disparity are repaired in three stages: 4-neighbour diffusion, linear
+interpolation over unresolved regions, and a short final diffusion pass
+to blend the boundaries.
+
+This stage is implemented in \texttt{codes/o1.py} and writes
+dataset-style scene folders so later objectives can inspect or reuse the
+generated stereo pairs. Each scene folder contains \texttt{im0.png},
+synthetic \texttt{im1.png}, \texttt{disp0.pfm}, and copied calibration
+metadata where available. The quantitative score is the SSIM between the
+true right image and the synthesized right image.
+
+\subsubsection{2.2 b. Three Generated
+Examples}\label{b.-three-generated-examples}
+
+\exampletriple{EBU6307_ZIXI_YU_231223210/results/O1b_synthetic_data/artroom2/im1.png}{(1) artroom2 synthetic right view}{EBU6307_ZIXI_YU_231223210/results/O1b_synthetic_data/chess3/im1.png}{(2) chess3 synthetic right view}{EBU6307_ZIXI_YU_231223210/results/O1b_synthetic_data/ladder1/im1.png}{(3) ladder1 synthetic right view}
+
+\textbf{Example 1:} \texttt{artroom2} synthetic right view, SSIM =
+\textbf{0.8427}. The large foreground flower and cabinet structures
+remain visually coherent after reprojection.\\
+\textbf{Example 2:} \texttt{chess3} synthetic right view, SSIM =
+\textbf{0.7602}. Repeated edges and thin structures make the
+reprojection harder, so the score is lower than \texttt{artroom2}.\\
+\textbf{Example 3:} \texttt{ladder1} synthetic right view, SSIM =
+\textbf{0.8005}. The result preserves the main geometry well, especially
+on the ladder rails and background planes.
+
+\subsubsection{2.3 c.~Quantitative
+Evaluation}\label{c.-quantitative-evaluation}
+
+All 24 scenes were synthesized with a horizontal shift setting of 8
+pixels, and the final evaluation was recorded in
+\texttt{results/O1c\_synthetic\_data/SSIM.csv}.
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Objective 1 summary statistics.} Scene-level SSIM results over all 24 evaluated Middlebury scenes for synthetic stereo generation.}
+\label{tab:o1_stats_en}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c}
+\reportdoubletoprule
+\theadc{Statistic} & \theadc{Value} \\
+\midrule
+Number of scenes & 24 \\
+Mean SSIM & 0.7796 \\
+Median SSIM & 0.7758 \\
+Best scene & \texttt{bandsaw2} with 0.9159 \\
+Worst scene & \texttt{skates1} with 0.6562 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Objective 1 selected examples.} SSIM values corresponding to the three visual examples shown for synthetic stereo generation.}
+\label{tab:o1_examples_en}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c}
+\reportdoubletoprule
+\theadc{Selected example scene} & \theadc{SSIM} \\
+\midrule
+artroom2 & 0.8427 \\
+chess3 & 0.7602 \\
+ladder1 & 0.8005 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+\subsubsection{2.4 d.~Discussion}\label{d.-discussion}
+
+\begin{itemize}
+\tightlist
+\item
+  The code for O1 directly reflects the pipeline figure: disparity
+  cleaning, forward projection, hole filling, and SSIM evaluation are
+  all implemented explicitly in \texttt{codes/o1.py}.
+\item
+  The synthetic stereo generation works reliably on all 24 scenes and
+  produces the PDF-required outputs in the correct folder structure.
+\item
+  The mean SSIM of 0.7796 shows that the generated right views preserve
+  most of the scene structure, even though they are produced without
+  learning.
+\item
+  \texttt{artroom2} performs well because the large surfaces and depth
+  layers are easy to reproject consistently.
+\item
+  \texttt{chess3} is more difficult because repeated edges and fine
+  structures amplify small projection and interpolation errors.
+\item
+  The weakest scenes, such as \texttt{skates1}, likely suffer from
+  stronger occlusion boundaries and fine foreground detail, which make
+  forward warping less stable.
+\item
+  A major strength of this implementation is that it keeps the true
+  disparity geometry rather than compressing the disparity range into a
+  toy visualization-only shift.
+\item
+  The main limitation is that forward projection still creates visible
+  missing regions around sharp depth transitions, and these regions must
+  be repaired heuristically.
+\item
+  A clear next step would be sub-pixel splatting or backward warping
+  with explicit visibility reasoning to reduce tearing and improve
+  structural similarity.
+\end{itemize}
+
+\subsection{3. Objective 2: SIFT Feature Descriptor Generation and
+Repeatability
+Evaluation}\label{objective-2-sift-feature-descriptor-generation-and-repeatability-evaluation}
+
+\subsubsection{3.1 a. Pipeline Figure}\label{a.-pipeline-figure-1}
+
+\begin{center}
+\includegraphics[width=\linewidth]{EBU6307_ZIXI_YU_231223210/results/O2a_sift/sift_pipeline.jpg}
+\end{center}
+
+An enlarged rotated copy is also provided in the appendix for easier
+reading.
+
+Objective 2 evaluates a hand-written SIFT pipeline under deterministic
+random image transformations. For each scene, the original image is
+transformed by a known affine, rotation, or intensity perturbation. The
+detector in \texttt{codes/o2.py} does not call OpenCV SIFT; instead, it
+constructs a Gaussian scale space, forms the DoG pyramid, searches for
+26-neighbour extrema, refines their location using 3D Taylor expansion,
+rejects low-contrast and edge-like responses, assigns dominant
+orientations, and builds standard 128-dimensional descriptors from
+rotated 4 x 4 x 8 histograms.
+
+Descriptor matching is performed by Euclidean KNN followed by Lowe ratio
+filtering. A match is counted as repeatable only if the matched keypoint
+agrees with the known transformation homography within a 4-pixel
+threshold. This makes the evaluation stricter than simple descriptor
+similarity and better aligned with the real notion of geometric
+repeatability.
+
+\subsubsection{3.2 b. Three Generated
+Examples}\label{b.-three-generated-examples-1}
+
+\begin{center}
+\siftexamplerow{EBU6307_ZIXI_YU_231223210/results/O2b_sift/artroom2/im0_keypoints.png}{1a}{(1a) im0 keypoints}{EBU6307_ZIXI_YU_231223210/results/O2b_sift/artroom2/im1_keypoints.png}{1b}{(1b) im1 keypoints}{EBU6307_ZIXI_YU_231223210/results/O2b_sift/artroom2/sift_matches.png}{1c}{(1c) matches}
+\vspace{0.6em}
+
+\siftexamplerow{EBU6307_ZIXI_YU_231223210/results/O2b_sift/chess3/im0_keypoints.png}{2a}{(2a) im0 keypoints}{EBU6307_ZIXI_YU_231223210/results/O2b_sift/chess3/im1_keypoints.png}{2b}{(2b) im1 keypoints}{EBU6307_ZIXI_YU_231223210/results/O2b_sift/chess3/sift_matches.png}{2c}{(2c) matches}
+\vspace{0.6em}
+
+\siftexamplerowsmall{EBU6307_ZIXI_YU_231223210/results/O2b_sift/ladder1/im0_keypoints.png}{3a}{(3a) im0 keypoints}{EBU6307_ZIXI_YU_231223210/results/O2b_sift/ladder1/im1_keypoints.png}{3b}{(3b) im1 keypoints}{EBU6307_ZIXI_YU_231223210/results/O2b_sift/ladder1/sift_matches.png}{3c}{(3c) matches}
+\end{center}
+
+\textbf{Example 1:} \texttt{artroom2}, transform family =
+\textbf{affine}, repeatability = \textbf{0.7413}. The im0/im1 keypoint
+overlays are dense, and the match visualization remains mostly
+geometrically consistent.\\
+\textbf{Example 2:} \texttt{chess3}, transform family = \textbf{affine},
+repeatability = \textbf{0.7013}. The detector remains reasonably stable
+in both keypoint maps despite repeated indoor structure.\\
+\textbf{Example 3:} \texttt{ladder1}, transform family =
+\textbf{rotation}, repeatability = \textbf{0.6400}. Thin elongated
+structures are still visible in the keypoint overlays, but rotational
+variation is more challenging than simple intensity changes.
+
+\subsubsection{3.3 c.~Quantitative
+Evaluation}\label{c.-quantitative-evaluation-1}
+
+The complete scene-level metrics are stored in
+\texttt{results/O2c\_sift/metrics.csv}.
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Objective 2 summary statistics.} Scene-level repeatability results over all 24 transformed scenes.}
+\label{tab:o2_stats_en}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c}
+\reportdoubletoprule
+\theadc{Statistic} & \theadc{Value} \\
+\midrule
+Number of scenes & 24 \\
+Mean repeatability & 0.6506 \\
+Median repeatability & 0.6319 \\
+Best scene & \texttt{artroom1} with 0.8313 \\
+Worst scene & \texttt{skates1} with 0.4662 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Objective 2 repeatability by transform family.} Mean repeatability grouped by intensity, affine, and rotation perturbations.}
+\label{tab:o2_family_en}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c}
+\reportdoubletoprule
+\theadc{Transform family} & \theadc{Mean repeatability} \\
+\midrule
+intensity & 0.7225 \\
+affine & 0.6429 \\
+rotation & 0.5864 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Objective 2 selected examples.} Repeatability values for the three visual examples shown in the SIFT evaluation section.}
+\label{tab:o2_examples_en}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c c}
+\reportdoubletoprule
+\theadc{Selected example scene} & \theadc{Transform family} & \theadc{Repeatability} \\
+\midrule
+artroom2 & affine & 0.7413 \\
+chess3 & affine & 0.7013 \\
+ladder1 & rotation & 0.6400 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+\subsubsection{3.4 d.~Discussion}\label{d.-discussion-1}
+
+\begin{itemize}
+\tightlist
+\item
+  O2 demonstrates that the manual implementation in \texttt{codes/o2.py}
+  successfully reproduces the main stages of the classical SIFT
+  algorithm rather than delegating the task to a black-box library.
+\item
+  The required deliverables were produced correctly: pipeline figure,
+  three example visualizations, and the repeatability CSV table.
+\item
+  The overall mean repeatability of 0.6506 is solid for a fully
+  hand-crafted detector and descriptor evaluated under multiple
+  transformation families.
+\item
+  Intensity changes are handled best, with a mean repeatability of
+  0.7225, which indicates that the normalization and orientation
+  assignment stages are working as intended.
+\item
+  Rotational perturbations are the hardest case, with a mean
+  repeatability of 0.5864, showing that viewpoint and alignment changes
+  still reduce descriptor stability.
+\item
+  \texttt{artroom2} is a good example because the cluttered scene
+  contains many stable corners and textured regions that produce
+  consistent matches.
+\item
+  \texttt{skates1} is the weakest scene, suggesting that reflective or
+  low-repeatability structures still challenge the hand-crafted
+  descriptor.
+\item
+  From a code reflection perspective, the detector is explainable and
+  educational, but it is also more sensitive to parameter choices than a
+  heavily optimized industrial implementation.
+\item
+  The next improvement would be sub-bin spatial interpolation and
+  stronger descriptor pooling around difficult rotations, which should
+  increase stability without abandoning the manual implementation.
+\end{itemize}
+
+\subsection{4. Objective 3: Stereo Depth Estimation Based on
+SIFT}\label{objective-3-stereo-depth-estimation-based-on-sift}
+
+\subsubsection{4.1 a. Pipeline Figure}\label{a.-pipeline-figure-2}
+
+\begin{center}
+\includegraphics[width=\linewidth]{EBU6307_ZIXI_YU_231223210/results/O3a_disparity/dep_pipeline.jpg}
+\end{center}
+
+An enlarged rotated copy is also provided in the appendix for easier
+reading.
+
+Objective 3 turns sparse SIFT evidence into dense stereo depth
+estimation. The implementation first detects manual SIFT features on the
+left and right views, performs descriptor KNN matching, applies ratio,
+mutual, and stereo-geometry filtering, and converts the reliable
+correspondences into a sparse disparity prior. This prior is then
+injected into a dense census-plus-gradient matching pipeline with
+scene-adaptive disparity bounds.
+
+The dense stage uses eight-direction Semi-Global Matching to aggregate
+the cost volume. The result is refined by left-right consistency, local
+support masking, speckle removal, median filtering, joint weighted
+median filtering, and small gap filling. The final depth output is saved
+as \texttt{disp0.pfm}, while \texttt{disp0.png} provides a colorized
+preview for the report.
+
+\subsubsection{4.2 b. Three Generated
+Examples}\label{b.-three-generated-examples-2}
+
+\exampletriple{EBU6307_ZIXI_YU_231223210/results/O3b_disparity/artroom2/disp0.png}{(1) artroom2 disparity}{EBU6307_ZIXI_YU_231223210/results/O3b_disparity/chess3/disp0.png}{(2) chess3 disparity}{EBU6307_ZIXI_YU_231223210/results/O3b_disparity/ladder1/disp0.png}{(3) ladder1 disparity}
+
+\textbf{Example 1:} \texttt{artroom2}, MAE = \textbf{2.0799}, RMSE =
+\textbf{5.7954}, Bad-1px = \textbf{0.4266}. The flower and cabinet
+geometry are recovered with visible object boundaries, although some
+invalid regions remain black.\\
+\textbf{Example 2:} \texttt{chess3}, MAE = \textbf{1.7968}, RMSE =
+\textbf{6.4951}, Bad-1px = \textbf{0.2930}. The method handles the scene
+relatively well despite challenging structure.\\
+\textbf{Example 3:} \texttt{ladder1}, MAE = \textbf{2.1101}, RMSE =
+\textbf{3.8366}, Bad-1px = \textbf{0.4802}. The thin ladder rails are
+preserved, but the strict consistency filtering leaves holes around
+narrow structures.
+
+\subsubsection{4.3 c.~Quantitative
+Evaluation}\label{c.-quantitative-evaluation-2}
+
+The full scene-level results are stored in
+\texttt{results/O3c\_disparity/metrics.csv}.
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Objective 3 summary statistics.} Dense disparity evaluation results over all 24 benchmark scenes.}
+\label{tab:o3_stats_en}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c}
+\reportdoubletoprule
+\theadc{Statistic} & \theadc{Value} \\
+\midrule
+Number of scenes & 24 \\
+Mean MAE & 2.3357 \\
+Mean RMSE & 6.8212 \\
+Mean Bad-1px & 0.3881 \\
+Median MAE & 2.0749 \\
+Best scene & \texttt{skates2} with MAE 1.2164 \\
+Worst scene & \texttt{podium1} with MAE 7.3048 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Objective 3 selected examples.} Error metrics corresponding to the three disparity examples shown in the O3 section.}
+\label{tab:o3_examples_en}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c c c}
+\reportdoubletoprule
+\theadc{Selected example scene} & \theadc{MAE} & \theadc{RMSE} & \theadc{Bad-1px} \\
+\midrule
+artroom2 & 2.0799 & 5.7954 & 0.4266 \\
+chess3 & 1.7968 & 6.4951 & 0.2930 \\
+ladder1 & 2.1101 & 3.8366 & 0.4802 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+\subsubsection{4.4 d.~Discussion}\label{d.-discussion-2}
+
+\begin{itemize}
+\tightlist
+\item
+  O3 successfully connects the feature engineering from O2 with a dense
+  stereo backend, and the implementation in \texttt{codes/o3.py} clearly
+  reflects that hybrid design.
+\item
+  The pipeline produced the required architecture figure, three
+  disparity examples, and a full disparity error table for all scenes.
+\item
+  With a mean MAE of 2.3357, O3 provides a strong classical baseline for
+  the later learned model in O4.
+\item
+  A key strength is that sparse SIFT matches inject reliable structure
+  into the dense matcher, especially in scenes with clear local texture.
+\item
+  Visually, O3 often preserves sharper fine detail than O4, as seen
+  around the flower boundaries in \texttt{artroom2} and the ladder rails
+  in \texttt{ladder1}.
+\item
+  The tradeoff is density: left-right consistency and support filtering
+  remove many uncertain pixels, so the preview contains more black
+  invalid regions.
+\item
+  \texttt{podium1} is the clearest failure case, with much higher error
+  than the dataset median, showing that some scenes still break the
+  matching assumptions.
+\item
+  From a testing perspective, the scene-level metric table confirms that
+  the method ran end-to-end across the whole evaluation set and produced
+  formal PFM outputs.
+\item
+  The next improvement would be stronger occlusion reasoning and
+  adaptive post-processing so that fine details can be preserved without
+  leaving so many invalid holes.
+\end{itemize}
+
+\subsection{5. Objective 4: Stereo Depth Estimation with a Vision
+Transformer Style
+Model}\label{objective-4-stereo-depth-estimation-with-a-vision-transformer-style-model}
+
+\subsubsection{5.1 a. Pipeline / Architecture
+Figure}\label{a.-pipeline-architecture-figure}
+
+\begin{center}
+\includegraphics[width=\linewidth]{EBU6307_ZIXI_YU_231223210/results/O4a_transformer/transformer_pipeline.jpg}
+\end{center}
+
+An enlarged rotated copy is also provided in the appendix for easier
+reading.
+
+Objective 4 replaces hand-crafted SIFT descriptors with trainable token
+descriptors and a lightweight Transformer encoder. The implemented model
+is a custom \texttt{StereoTokenTransformer} defined in
+\texttt{codes/o4.py} and \texttt{codes/o4\_torch.py}, not an
+off-the-shelf large ViT backbone. The pipeline converts grayscale stereo
+images into 2 x 2 patch tokens, augments them with gradient and local
+context channels, maps them into token embeddings, and then uses cosine
+similarity to build a token-level cost volume.
+
+The learned token cost volume is regularized by the same general stereo
+reasoning as O3, but on the token grid: scene-adaptive disparity
+bounds, eight-direction SGM, token left-right consistency with a
+confidence margin, anchor-guided token cleanup, weighted-median
+correction, and 2 x 2 upsampling back to full resolution. The formal
+outputs are produced with 5-fold cross-validation and saved to
+\texttt{results/O4b\_transformer/} and
+\texttt{results/O4c\_transformer/}.
+
+\subsubsection{5.2 b. Three Generated
+Examples}\label{b.-three-generated-examples-3}
+
+\begin{center}
+\exampletriptychrow{EBU6307_ZIXI_YU_231223210/results/O4b_transformer/artroom2/disp0_transformer_raw.png}{1a}{(1a) raw}{EBU6307_ZIXI_YU_231223210/results/O4b_transformer/artroom2/disp0_transformer_raw_filtered.png}{1b}{(1b) raw filtered}{EBU6307_ZIXI_YU_231223210/results/O4b_transformer/artroom2/disp0.png}{1c}{(1c) final disparity}
+\vspace{0.6em}
+
+\exampletriptychrow{EBU6307_ZIXI_YU_231223210/results/O4b_transformer/chess3/disp0_transformer_raw.png}{2a}{(2a) raw}{EBU6307_ZIXI_YU_231223210/results/O4b_transformer/chess3/disp0_transformer_raw_filtered.png}{2b}{(2b) raw filtered}{EBU6307_ZIXI_YU_231223210/results/O4b_transformer/chess3/disp0.png}{2c}{(2c) final disparity}
+\vspace{0.6em}
+
+\exampletriptychrow{EBU6307_ZIXI_YU_231223210/results/O4b_transformer/ladder1/disp0_transformer_raw.png}{3a}{(3a) raw}{EBU6307_ZIXI_YU_231223210/results/O4b_transformer/ladder1/disp0_transformer_raw_filtered.png}{3b}{(3b) raw filtered}{EBU6307_ZIXI_YU_231223210/results/O4b_transformer/ladder1/disp0.png}{3c}{(3c) final disparity}
+\end{center}
+
+\textbf{Example 1:} \texttt{artroom2}, test fold = \textbf{1}, MAE =
+\textbf{2.2037}, RMSE = \textbf{6.5174}, Bad-1px = \textbf{0.3794}. The
+raw token disparity is noisy, the filtered raw map is cleaner, and the
+final map is denser and smoother than O3.\\
+\textbf{Example 2:} \texttt{chess3}, test fold = \textbf{1}, MAE =
+\textbf{5.2626}, RMSE = \textbf{13.1028}, Bad-1px = \textbf{0.3145}.
+Repeated structure is already visible as ambiguity in the raw maps and
+remains difficult for the learned token matcher after refinement, leading
+to a much larger regression error.\\
+\textbf{Example 3:} \texttt{ladder1}, test fold = \textbf{0}, MAE =
+\textbf{1.9797}, RMSE = \textbf{3.7391}, Bad-1px = \textbf{0.4337}. The
+raw and filtered maps already preserve the ladder structure, and the
+final output remains denser than O3 while staying close in error.
+
+\subsubsection{5.3 c.~Quantitative
+Evaluation}\label{c.-quantitative-evaluation-3}
+
+The complete results are stored in
+\texttt{results/O4c\_transformer/metrics.csv}, and the fold-wise
+cross-validation summary is stored in
+\texttt{results/O4c\_transformer/fold\_summary.csv}.
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Objective 4 summary statistics.} Overall five-fold cross-validation disparity evaluation results across the 24 benchmark scenes.}
+\label{tab:o4_stats_en}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c}
+\reportdoubletoprule
+\theadc{Statistic} & \theadc{Value} \\
+\midrule
+Number of scenes & 24 \\
+Cross-validation folds & 5 \\
+Mean MAE & 3.3176 \\
+Mean RMSE & 8.1083 \\
+Mean Bad-1px & 0.3721 \\
+Median MAE & 2.4049 \\
+Best scene & \texttt{skates2} with MAE 1.0481 \\
+Worst scene & \texttt{podium1} with MAE 12.7761 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Objective 4 fold-wise summary.} Mean performance for each cross-validation fold in the Transformer-based stereo evaluation.}
+\label{tab:o4_folds_en}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c c c c}
+\reportdoubletoprule
+\theadc{Fold} & \theadc{Scene count} & \theadc{Mean MAE} & \theadc{Mean RMSE} & \theadc{Mean Bad-1px} \\
+\midrule
+0 & 5 & 3.5480 & 8.9336 & 0.4122 \\
+1 & 5 & 5.0527 & 11.0331 & 0.4554 \\
+2 & 5 & 2.4753 & 6.7348 & 0.3182 \\
+3 & 5 & 2.4646 & 6.1603 & 0.3522 \\
+4 & 4 & 2.9799 & 7.5726 & 0.3102 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Objective 4 selected examples.} Fold assignment and error metrics for the three visual examples shown in the O4 section.}
+\label{tab:o4_examples_en}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c c c c}
+\reportdoubletoprule
+\theadc{Selected example scene} & \theadc{Fold} & \theadc{MAE} & \theadc{RMSE} & \theadc{Bad-1px} \\
+\midrule
+artroom2 & 1 & 2.2037 & 6.5174 & 0.3794 \\
+chess3 & 1 & 5.2626 & 13.1028 & 0.3145 \\
+ladder1 & 0 & 1.9797 & 3.7391 & 0.4337 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+\subsubsection{5.4 d.~Discussion}\label{d.-discussion-3}
+
+\begin{itemize}
+\tightlist
+\item
+  O4 satisfies the PDF requirement for a Vision Transformer based
+  objective by replacing SIFT descriptors with a trainable Transformer
+  token encoder and reporting 5-fold cross-validation results.
+\item
+  The implementation is more ambitious than O3 because it combines
+  learned descriptors with structured stereo regularization instead of
+  relying on either one alone.
+\item
+  The strongest qualitative advantage of O4 is output density: compared
+  with O3, the disparity maps are usually smoother and contain fewer
+  black invalid holes.
+\item
+  Quantitatively, O4 achieves a slightly better mean Bad-1px than O3
+  (0.3721 vs 0.3881), which suggests that many pixels are closer to the
+  correct disparity within a 1-pixel tolerance.
+\item
+  However, O4 is worse than O3 on mean MAE and mean RMSE, showing that
+  the learned model still makes larger absolute errors on difficult
+  scenes.
+\item
+  \texttt{chess1}, \texttt{chess2}, \texttt{chess3}, and especially
+  \texttt{podium1} show that the current token model is still vulnerable
+  to repeated structures and hard scene-specific ambiguity.
+\item
+  The fold summary also shows visible variance across splits, with fold
+  1 clearly harder than the others, so the current model is not yet
+  fully stable.
+\item
+  From a code reflection perspective, the model is compact and
+  reproducible, with 478,309 trainable parameters and a clear
+  checkpointed 5-fold workflow.
+\item
+  The next improvement would be to strengthen the token descriptor with
+  richer context and stronger confidence-aware filtering so the model
+  keeps O4's density advantage while reducing the large-scene outliers.
+\end{itemize}
+
+\subsection{6. O3 and O4 Comparison}\label{o3-and-o4-comparison}
+
+Because O4 is designed as the learned alternative to O3, the most
+important comparison is between the classical and Transformer-based
+stereo systems on the same 24 scenes.
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Comparison between O3 and O4.} Aggregate metric comparison on the shared 24-scene benchmark, with better values highlighted in bold.}
+\label{tab:o3_o4_compare_en}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c c c}
+\reportdoubletoprule
+\theadc{Metric} & \theadc{O3} & \theadc{O4} & \theadc{Better objective} \\
+\midrule
+Mean MAE & \textbf{2.3357} & 3.3176 & O3 \\
+Mean RMSE & \textbf{6.8212} & 8.1083 & O3 \\
+Mean Bad-1px & 0.3881 & \textbf{0.3721} & O4 \\
+Scene wins by MAE & \textbf{15} & 9 & O3 \\
+Scene wins by RMSE & \textbf{14} & 10 & O3 \\
+Scene wins by Bad-1px & 10 & \textbf{14} & O4 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+This comparison shows a clear and useful tradeoff. O3 remains the
+stronger baseline when absolute disparity precision is the priority,
+especially on the most difficult scenes. O4, however, now narrows the
+gap on both MAE and RMSE while still producing denser and smoother
+maps, and it further improves the fraction of pixels that fall within a
+1-pixel error tolerance. In other words, O4 clearly demonstrates the
+promise of learned descriptors, but the current compact Transformer
+still needs better scene generalization to consistently surpass the
+classical hybrid baseline.
+
+\subsection{7. Conclusion}\label{conclusion}
+
+This mini project successfully delivered all four required objectives in
+the requested folder structure. O1 generated synthetic stereo pairs with
+good structural similarity, O2 implemented a fully manual SIFT pipeline
+with meaningful repeatability scores, O3 produced a strong classical
+stereo baseline, and O4 extended the project into a learned
+Transformer-based stereo system with 5-fold cross-validation.
+
+The most important overall finding is that the project does not simply
+progress from ``traditional'' to ``deep'' methods in a superficial way.
+Instead, each stage builds technically on the previous one: O1 provides
+controlled image synthesis, O2 validates local feature robustness, O3
+converts feature evidence into dense geometry, and O4 tests whether
+trainable token descriptors can outperform hand-crafted features. At the
+current stage, O3 still wins on average MAE and RMSE, while O4 offers
+denser predictions, slightly better Bad-1px performance, and a smaller
+remaining gap in absolute error than before. This gives a clear roadmap
+for future work: preserve O4's density advantage while improving
+robustness on repeated-pattern and hard-ambiguity scenes.
+
+\clearpage
+\appendix
+\section{Appendix: O2--O4 Pipeline Figures}
+
+\subsection*{Objective 2 Pipeline Figure}
+\appendixpipelinefigure{EBU6307_ZIXI_YU_231223210/results/O2a_sift/sift_pipeline.jpg}
+
+\clearpage
+\subsection*{Objective 3 Pipeline Figure}
+\appendixpipelinefigure{EBU6307_ZIXI_YU_231223210/results/O3a_disparity/dep_pipeline.jpg}
+
+\clearpage
+\subsection*{Objective 4 Pipeline / Architecture Figure}
+\appendixpipelinefigure{EBU6307_ZIXI_YU_231223210/results/O4a_transformer/transformer_pipeline.jpg}
+
+\end{document}

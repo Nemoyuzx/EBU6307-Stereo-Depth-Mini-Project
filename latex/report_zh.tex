@@ -1,0 +1,778 @@
+% Options for packages loaded elsewhere
+\PassOptionsToPackage{unicode}{hyperref}
+\PassOptionsToPackage{hyphens}{url}
+\documentclass[
+  11pt,
+]{article}
+\usepackage{xcolor}
+\usepackage[margin=2.54cm]{geometry}
+\usepackage{amsmath,amssymb}
+\setcounter{secnumdepth}{-\maxdimen} % remove section numbering
+\usepackage{iftex}
+\ifPDFTeX
+  \usepackage[T1]{fontenc}
+  \usepackage[utf8]{inputenc}
+  \usepackage{textcomp} % provide euro and other symbols
+\else % if luatex or xetex
+  \usepackage{unicode-math} % this also loads fontspec
+  \defaultfontfeatures{Scale=MatchLowercase}
+  \defaultfontfeatures[\rmfamily]{Ligatures=TeX,Scale=1}
+\fi
+\usepackage{lmodern}
+\ifPDFTeX\else
+  % xetex/luatex font selection
+\fi
+% Use upquote if available, for straight quotes in verbatim environments
+\IfFileExists{upquote.sty}{\usepackage{upquote}}{}
+\IfFileExists{microtype.sty}{% use microtype if available
+  \usepackage[]{microtype}
+  \UseMicrotypeSet[protrusion]{basicmath} % disable protrusion for tt fonts
+}{}
+\makeatletter
+\@ifundefined{KOMAClassName}{% if non-KOMA class
+  \IfFileExists{parskip.sty}{%
+    \usepackage{parskip}
+  }{% else
+    \setlength{\parindent}{0pt}
+    \setlength{\parskip}{6pt plus 2pt minus 1pt}}
+}{% if KOMA class
+  \KOMAoptions{parskip=half}}
+\makeatother
+\setlength{\emergencystretch}{3em} % prevent overfull lines
+\providecommand{\tightlist}{%
+  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+\usepackage{graphicx}
+\graphicspath{{../}}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage[table]{xcolor}
+\usepackage{array}
+\usepackage{float}
+\usepackage{xeCJK}
+\setCJKmainfont{Songti SC}
+\usepackage{bookmark}
+\IfFileExists{xurl.sty}{\usepackage{xurl}}{} % add URL line breaks if available
+\urlstyle{same}
+\hypersetup{
+  hidelinks,
+  pdfcreator={LaTeX via pandoc}}
+
+\author{}
+\date{}
+
+\begin{document}
+
+\section{EBU6307
+立体深度迷你项目报告}\label{ebu6307-ux7acbux4f53ux6df1ux5ea6ux8ff7ux4f60ux9879ux76eeux62a5ux544a}
+
+\textbf{学生姓名：} Zixi Yu\\
+\textbf{学号：} 231223210\\
+\textbf{提交文件夹：} EBU6307\_ZIXI\_YU\_231223210
+
+\newsavebox{\exampleleftbox}
+\newcolumntype{L}{>{\raggedright\arraybackslash}X}
+\newcolumntype{C}{>{\centering\arraybackslash}X}
+\newcommand{\theadl}[1]{\multicolumn{1}{l}{\textbf{#1}}}
+\newcommand{\theadc}[1]{\multicolumn{1}{c}{\textbf{#1}}}
+\newcommand{\reportdoubletoprule}{%
+\specialrule{1pt}{0pt}{1pt}%
+\toprule
+}
+\newcommand{\exampletriple}[6]{%
+\begin{center}%
+\sbox{\exampleleftbox}{%
+\begin{minipage}[t]{0.58\linewidth}
+\centering
+\vspace{0pt}
+\includegraphics[width=0.98\linewidth]{#1}\\[-0.2em]
+{\footnotesize #2}
+
+\vspace{0.6em}
+\includegraphics[width=0.98\linewidth]{#3}\\[-0.2em]
+{\footnotesize #4}
+\end{minipage}%
+}%
+\usebox{\exampleleftbox}\hspace{0.015\linewidth}
+\begin{minipage}[t]{0.36\linewidth}
+\centering
+\vspace{0pt}
+\includegraphics[height=\dimexpr\ht\exampleleftbox+\dp\exampleleftbox-2.2em\relax]{#5}\\[-0.2em]
+{\footnotesize #6}
+\end{minipage}
+\end{center}%
+}
+\newcommand{\annotatedexampleimage}[4][\linewidth]{%
+\begin{minipage}[t]{#1}
+\centering
+\includegraphics[width=\linewidth]{#2}\\[-0.2em]
+{\footnotesize #4}
+\end{minipage}
+}
+\newcommand{\exampletriptychrow}[9]{%
+\annotatedexampleimage[0.32\linewidth]{#1}{#2}{#3}\hfill
+\annotatedexampleimage[0.32\linewidth]{#4}{#5}{#6}\hfill
+\annotatedexampleimage[0.32\linewidth]{#7}{#8}{#9}\par
+}
+\newcommand{\appendixpipelinefigure}[1]{%
+\begin{center}
+\includegraphics[angle=90,totalheight=0.9\textheight]{#1}
+\end{center}
+}
+\newcommand{\siftexamplerow}[9]{%
+\begin{minipage}[t]{0.98\linewidth}
+\centering
+\annotatedexampleimage[0.49\linewidth]{#1}{#2}{#3}\hfill
+\annotatedexampleimage[0.49\linewidth]{#4}{#5}{#6}\\[0.45em]
+\annotatedexampleimage[\linewidth]{#7}{#8}{#9}
+\end{minipage}\par
+}
+\newcommand{\siftexamplerowsmall}[9]{%
+\begin{minipage}[t]{0.72\linewidth}
+\centering
+\annotatedexampleimage[0.49\linewidth]{#1}{#2}{#3}\hfill
+\annotatedexampleimage[0.49\linewidth]{#4}{#5}{#6}\\[0.45em]
+\annotatedexampleimage[\linewidth]{#7}{#8}{#9}
+\end{minipage}\par
+}
+
+\subsection{1. 项目概述}\label{ux9879ux76eeux6982ux8ff0}
+
+本报告依据 EBU6307 Mini Project 的 PDF 要求，对四个 objective
+的实现方法、示例结果、量化指标和结果讨论进行整理。报告中使用的所有证据均直接来自提交文件夹
+\texttt{EBU6307\_ZIXI\_YU\_231223210}：程序位于
+\texttt{codes/}，实验产物位于 \texttt{results/}。全部实验覆盖 24 个官方
+Middlebury 场景，并且每个 objective 均按照作业要求包含四个部分：a.
+流程图，b. 三个示例结果，c.~表格化量化评估，d.~8 到 10 行结果讨论。
+
+整个项目的技术路线具有递进关系。O1
+先从几何重投影出发生成合成立体图像；O2 在受控变换下验证手写 SIFT
+描述子的稳定性；O3 将稀疏特征匹配扩展为稠密立体匹配与深度估计；O4
+则进一步使用轻量级 Vision Transformer 风格的 token
+描述子替代手工特征，并采用 5 折交叉验证评估泛化能力。
+
+\begin{table}[H]
+\centering
+\caption{\textbf{项目 objective 与交付物总览。} 汇总四个 mini project objective 的主程序入口、要求提交的结果目录以及核心量化指标。}
+\label{tab:project_overview_zh}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabularx}{\columnwidth}{L C L C}
+\reportdoubletoprule
+\theadl{Objective} & \theadc{主程序} & \theadl{对应结果目录} & \theadc{核心指标} \\
+\midrule
+O1 合成立体图像生成 & \texttt{codes/o1.py} & results/O1a\_*, results/O1b\_*, results/O1c\_* & SSIM \\
+O2 手写 SIFT 重复性评估 & \texttt{codes/o2.py} & results/O2a\_*, results/O2b\_*, results/O2c\_* & Repeatability \\
+O3 基于 SIFT 的立体深度估计 & \texttt{codes/o3.py} & results/O3a\_*, results/O3b\_*, results/O3c\_* & MAE / RMSE / Bad-1px \\
+O4 基于 Transformer 的立体深度估计 & \texttt{codes/o4.py} & results/O4a\_*, results/O4b\_*, results/O4c\_* & 5-fold CV MAE / RMSE / Bad-1px \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabularx}
+\vspace{1mm}
+\end{table}
+
+\subsection{2. Objective 1:
+图像重投影生成合成立体图像}\label{objective-1-ux56feux50cfux91cdux6295ux5f71ux751fux6210ux5408ux6210ux7acbux4f53ux56feux50cf}
+
+\subsubsection{2.1 a. 流程图}\label{a.-ux6d41ux7a0bux56fe}
+
+\begin{center}
+\includegraphics[width=\linewidth]{EBU6307_ZIXI_YU_231223210/results/O1a_synthetic_data/syn_pipeline.jpg}
+\end{center}
+
+O1
+的目标是利用原始左图和参考视差图生成一个深度感知的合成右视图。实现过程首先对参考视差进行清洗，只保留有限且非负的真实视差值，并进行轻度平滑，以减少离散边界带来的抖动。随后，程序根据视差将左图像素前向投影到合成视角中。由于近处像素会覆盖远处像素，因此这种做法比简单的全局平移更接近真实双目成像中的遮挡关系。
+
+前向投影后会在深度突变区域留下空洞，因此程序采用三阶段修补策略：第一阶段使用
+4
+邻域扩散修复细小裂缝；第二阶段对较大未解析区域执行线性插值；第三阶段再做短距离扩散，使插值区域和原始投影边界过渡更自然。该
+objective 的核心实现位于 \texttt{codes/o1.py}，每个场景输出
+\texttt{im0.png}、合成 \texttt{im1.png}、\texttt{disp0.pfm}
+以及相应元数据文件。质量指标采用真实右图与合成右图之间的 SSIM。
+
+\subsubsection{2.2 b.
+三个生成示例}\label{b.-ux4e09ux4e2aux751fux6210ux793aux4f8b}
+
+\exampletriple{EBU6307_ZIXI_YU_231223210/results/O1b_synthetic_data/artroom2/im1.png}{(1) artroom2 合成右视图}{EBU6307_ZIXI_YU_231223210/results/O1b_synthetic_data/chess3/im1.png}{(2) chess3 合成右视图}{EBU6307_ZIXI_YU_231223210/results/O1b_synthetic_data/ladder1/im1.png}{(3) ladder1 合成右视图}
+
+\textbf{Example 1：} \texttt{artroom2} 合成右视图，SSIM =
+\textbf{0.8427}。前景花束和柜体边缘保持得较完整，几何层次清晰。\\
+\textbf{Example 2：} \texttt{chess3} 合成右视图，SSIM =
+\textbf{0.7602}。重复边缘和细结构增加了重投影难度，因此得分低于
+\texttt{artroom2}。\\
+\textbf{Example 3：} \texttt{ladder1} 合成右视图，SSIM =
+\textbf{0.8005}。梯子和背景平面的主要结构都得到了较好的保留。
+
+\subsubsection{2.3 c.~量化评估}\label{c.-ux91cfux5316ux8bc4ux4f30}
+
+全部 24 个场景都采用 8 像素水平偏移设置完成合成，最终结果保存在
+\texttt{results/O1c\_synthetic\_data/SSIM.csv}。
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Objective 1 汇总统计。} 合成立体图像生成在全部 24 个 Middlebury 场景上的 SSIM 结果汇总。}
+\label{tab:o1_stats_zh}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c}
+\reportdoubletoprule
+\theadc{统计量} & \theadc{数值} \\
+\midrule
+场景数量 & 24 \\
+平均 SSIM & 0.7796 \\
+中位数 SSIM & 0.7758 \\
+最优场景 & \texttt{bandsaw2}，0.9159 \\
+最差场景 & \texttt{skates1}，0.6562 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Objective 1 示例结果。} 与三张展示图对应的 SSIM 指标。}
+\label{tab:o1_examples_zh}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c}
+\reportdoubletoprule
+\theadc{示例场景} & \theadc{SSIM} \\
+\midrule
+artroom2 & 0.8427 \\
+chess3 & 0.7602 \\
+ladder1 & 0.8005 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+\subsubsection{2.4 d.~讨论}\label{d.-ux8ba8ux8bba}
+
+\begin{itemize}
+\tightlist
+\item
+  O1 的代码结构与流程图高度一致，\texttt{codes/o1.py}
+  中明确实现了视差清洗、前向投影、空洞修补和 SSIM 评估等步骤。
+\item
+  该方法在 24 个场景上都成功运行，并生成了 PDF 要求中的完整结果文件。
+\item
+  平均 SSIM 为
+  0.7796，说明在不依赖学习模型的前提下，合成右图已经能够较好地保持原场景结构。
+\item
+  \texttt{artroom2}
+  得分较高，说明大面积平面和清晰的深度层在几何重投影中更容易保持稳定。
+\item
+  \texttt{chess3}
+  的表现较弱，说明重复边缘和细小结构会放大视差边界与插值误差。
+\item
+  \texttt{skates1}
+  是最差场景，表明强遮挡、复杂前景或细碎结构仍会明显影响合成质量。
+\item
+  本实现的一个优点是保留了真实视差范围，而不是把视差压缩成仅用于可视化的玩具位移。
+\item
+  局限性在于前向投影天然会在深度突变处留下空洞，后处理仍带有一定启发式性质。
+\item
+  下一步可以考虑使用亚像素 splatting 或带可见性建模的 backward
+  warping，以进一步提升结构相似度。
+\end{itemize}
+
+\subsection{3. Objective 2: SIFT
+特征描述子生成与重复性评估}\label{objective-2-sift-ux7279ux5f81ux63cfux8ff0ux5b50ux751fux6210ux4e0eux91cdux590dux6027ux8bc4ux4f30}
+
+\subsubsection{3.1 a. 流程图}\label{a.-ux6d41ux7a0bux56fe-1}
+
+\begin{center}
+\includegraphics[width=\linewidth]{EBU6307_ZIXI_YU_231223210/results/O2a_sift/sift_pipeline.jpg}
+\end{center}
+
+附录中同时保留了一份竖排放大的版本，便于看清细节。
+
+O2 的目标是在可控变换下评估手写 SIFT
+描述子的稳定性。对每个场景，程序先从原始图像出发构造一个已知的仿射、旋转或亮度扰动变换，再分别在原图和变换图上检测关键点并计算描述子。这里的实现不调用
+OpenCV 的 SIFT，而是在 \texttt{codes/o2.py} 中手工完成 Gaussian scale
+space、DoG 极值检测、3D Taylor
+定位、低对比度剔除、边缘响应剔除、主方向分配以及标准 128 维描述子构造。
+
+完成描述子提取后，程序使用欧氏距离 KNN 进行匹配，并通过 Lowe ratio test
+过滤歧义匹配。最终的 repeatability
+不是简单看描述子是否相似，而是利用已知变换对应的单应矩阵，检查匹配点是否落在真实投影位置附近。只有满足几何一致性的匹配才会被计为
+repeatable match。
+
+\subsubsection{3.2 b.
+三个生成示例}\label{b.-ux4e09ux4e2aux751fux6210ux793aux4f8b-1}
+
+\begin{center}
+\siftexamplerow{EBU6307_ZIXI_YU_231223210/results/O2b_sift/artroom2/im0_keypoints.png}{1a}{(1a) im0 keypoints}{EBU6307_ZIXI_YU_231223210/results/O2b_sift/artroom2/im1_keypoints.png}{1b}{(1b) im1 keypoints}{EBU6307_ZIXI_YU_231223210/results/O2b_sift/artroom2/sift_matches.png}{1c}{(1c) matches}
+\vspace{0.6em}
+
+\siftexamplerow{EBU6307_ZIXI_YU_231223210/results/O2b_sift/chess3/im0_keypoints.png}{2a}{(2a) im0 keypoints}{EBU6307_ZIXI_YU_231223210/results/O2b_sift/chess3/im1_keypoints.png}{2b}{(2b) im1 keypoints}{EBU6307_ZIXI_YU_231223210/results/O2b_sift/chess3/sift_matches.png}{2c}{(2c) matches}
+\vspace{0.6em}
+
+\siftexamplerowsmall{EBU6307_ZIXI_YU_231223210/results/O2b_sift/ladder1/im0_keypoints.png}{3a}{(3a) im0 keypoints}{EBU6307_ZIXI_YU_231223210/results/O2b_sift/ladder1/im1_keypoints.png}{3b}{(3b) im1 keypoints}{EBU6307_ZIXI_YU_231223210/results/O2b_sift/ladder1/sift_matches.png}{3c}{(3c) matches}
+\end{center}
+
+\textbf{Example 1：} \texttt{artroom2}，变换类型为
+\textbf{affine}，repeatability =
+\textbf{0.7413}。im0/im1 上的特征点标注都较密集，匹配连线也保持了较好的几何一致性。\\
+\textbf{Example 2：} \texttt{chess3}，变换类型为
+\textbf{affine}，repeatability =
+\textbf{0.7013}。在室内重复结构较多的情况下，两张特征点标注图仍表现出较稳定的检测结果。\\
+\textbf{Example 3：} \texttt{ladder1}，变换类型为
+\textbf{rotation}，repeatability =
+\textbf{0.6400}。细长结构在特征点标注图中仍能被检测，但旋转扰动比纯亮度变化更困难。
+
+\subsubsection{3.3 c.~量化评估}\label{c.-ux91cfux5316ux8bc4ux4f30-1}
+
+完整场景级指标保存在 \texttt{results/O2c\_sift/metrics.csv}。
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Objective 2 汇总统计。} 手写 SIFT 描述子在全部 24 个场景上的重复性结果汇总。}
+\label{tab:o2_stats_zh}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c}
+\reportdoubletoprule
+\theadc{统计量} & \theadc{数值} \\
+\midrule
+场景数量 & 24 \\
+平均重复性 & 0.6506 \\
+中位数重复性 & 0.6319 \\
+最优场景 & \texttt{artroom1}，0.8313 \\
+最差场景 & \texttt{skates1}，0.4662 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Objective 2 分变换类型统计。} 按 intensity、affine 和 rotation 三类扰动统计平均重复性。}
+\label{tab:o2_family_zh}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c}
+\reportdoubletoprule
+\theadc{变换类型} & \theadc{平均重复性} \\
+\midrule
+intensity & 0.7225 \\
+affine & 0.6429 \\
+rotation & 0.5864 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Objective 2 示例结果。} 三个展示样例对应的变换类型与重复性指标。}
+\label{tab:o2_examples_zh}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c c}
+\reportdoubletoprule
+\theadc{示例场景} & \theadc{变换类型} & \theadc{重复性} \\
+\midrule
+artroom2 & affine & 0.7413 \\
+chess3 & affine & 0.7013 \\
+ladder1 & rotation & 0.6400 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+\subsubsection{3.4 d.~讨论}\label{d.-ux8ba8ux8bba-1}
+
+\begin{itemize}
+\tightlist
+\item
+  O2 证明 \texttt{codes/o2.py} 中的手写实现已经覆盖了经典 SIFT
+  的关键阶段，而不是简单调用现成黑盒接口。
+\item
+  所要求的 deliverables 已经完整生成，包括 pipeline 图、三个示例图以及
+  repeatability 的 CSV 表格。
+\item
+  平均重复性 0.6506
+  对于完全手工实现的特征检测与描述流程来说是较稳健的结果。
+\item
+  亮度扰动场景表现最好，平均重复性达到
+  0.7225，说明归一化和主方向分配设计是有效的。
+\item
+  旋转扰动最难，平均重复性只有
+  0.5864，表明视角和姿态变化仍会削弱描述子的稳定性。
+\item
+  \texttt{artroom2}
+  是代表性较好的示例，因为它包含大量稳定角点和纹理区域，因此重复检测效果更好。
+\item
+  \texttt{skates1}
+  是最弱场景，说明反光、弱纹理或结构不稳定区域仍对手工描述子构成挑战。
+\item
+  从代码可解释性角度看，这一实现非常适合展示算法原理，但对参数设置也比成熟工业实现更敏感。
+\item
+  下一步可以考虑加入更强的空间插值和更稳定的方向统计，以提升复杂旋转条件下的表现。
+\end{itemize}
+
+\subsection{4. Objective 3: 基于 SIFT
+的立体深度估计}\label{objective-3-ux57faux4e8e-sift-ux7684ux7acbux4f53ux6df1ux5ea6ux4f30ux8ba1}
+
+\subsubsection{4.1 a. 流程图}\label{a.-ux6d41ux7a0bux56fe-2}
+
+\begin{center}
+\includegraphics[width=\linewidth]{EBU6307_ZIXI_YU_231223210/results/O3a_disparity/dep_pipeline.jpg}
+\end{center}
+
+附录中同时保留了一份竖排放大的版本，便于看清细节。
+
+O3 的目标是把稀疏的 SIFT
+匹配信息扩展为稠密的立体视差估计。实现中先在左右图上提取手写 SIFT
+特征，再经过 ratio test、mutual check
+和立体几何约束筛选出高可靠匹配，并将这些稀疏对应关系转换为 disparity
+seed prior。随后，这一先验被注入基于 census
+和梯度信息的稠密匹配流程之中，同时结合场景自适应的搜索视差范围进行代价体构建。
+
+在稠密阶段，程序采用八方向 Semi-Global Matching
+对代价体进行聚合，并分别求解左参考与右参考视差，再通过左右一致性约束、本地支持掩码、speckle
+removal、中值滤波、联合加权中值滤波和短距离 gap fill
+逐步清理结果。最终正式输出是 \texttt{disp0.pfm}，\texttt{disp0.png}
+仅作为 RGB 伪彩色预览图用于展示。
+
+\subsubsection{4.2 b.
+三个生成示例}\label{b.-ux4e09ux4e2aux751fux6210ux793aux4f8b-2}
+
+\exampletriple{EBU6307_ZIXI_YU_231223210/results/O3b_disparity/artroom2/disp0.png}{(1) artroom2 视差图}{EBU6307_ZIXI_YU_231223210/results/O3b_disparity/chess3/disp0.png}{(2) chess3 视差图}{EBU6307_ZIXI_YU_231223210/results/O3b_disparity/ladder1/disp0.png}{(3) ladder1 视差图}
+
+\textbf{Example 1：} \texttt{artroom2}，MAE = \textbf{2.0799}，RMSE =
+\textbf{5.7954}，Bad-1px =
+\textbf{0.4266}。花束和柜体轮廓恢复较清楚，但局部无效区域仍以黑色显示。\\
+\textbf{Example 2：} \texttt{chess3}，MAE = \textbf{1.7968}，RMSE =
+\textbf{6.4951}，Bad-1px =
+\textbf{0.2930}。在较困难的结构场景中仍取得了相对稳定的深度结果。\\
+\textbf{Example 3：} \texttt{ladder1}，MAE = \textbf{2.1101}，RMSE =
+\textbf{3.8366}，Bad-1px =
+\textbf{0.4802}。细长梯子结构被保留下来，但严格的一致性筛选带来了更多空洞。
+
+\subsubsection{4.3 c.~量化评估}\label{c.-ux91cfux5316ux8bc4ux4f30-2}
+
+完整场景级结果保存在 \texttt{results/O3c\_disparity/metrics.csv}。
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Objective 3 汇总统计。} O3 稠密视差估计在全部 24 个场景上的误差结果汇总。}
+\label{tab:o3_stats_zh}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c}
+\reportdoubletoprule
+\theadc{统计量} & \theadc{数值} \\
+\midrule
+场景数量 & 24 \\
+平均 MAE & 2.3357 \\
+平均 RMSE & 6.8212 \\
+平均 Bad-1px & 0.3881 \\
+中位数 MAE & 2.0749 \\
+最优场景 & \texttt{skates2}，MAE 1.2164 \\
+最差场景 & \texttt{podium1}，MAE 7.3048 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Objective 3 示例结果。} 三个 O3 视差展示样例对应的 MAE、RMSE 与 Bad-1px 指标。}
+\label{tab:o3_examples_zh}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c c c}
+\reportdoubletoprule
+\theadc{示例场景} & \theadc{MAE} & \theadc{RMSE} & \theadc{Bad-1px} \\
+\midrule
+artroom2 & 2.0799 & 5.7954 & 0.4266 \\
+chess3 & 1.7968 & 6.4951 & 0.2930 \\
+ladder1 & 2.1101 & 3.8366 & 0.4802 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+\subsubsection{4.4 d.~讨论}\label{d.-ux8ba8ux8bba-2}
+
+\begin{itemize}
+\tightlist
+\item
+  O3 成功把 O2
+  中的局部特征工程与稠密立体匹配结合起来，\texttt{codes/o3.py}
+  的实现能够清晰反映这种 hybrid 设计。
+\item
+  该 objective 已生成要求中的架构图、三个视差示例以及全部场景的误差表。
+\item
+  平均 MAE 为 2.3357，说明 O3 已经构成了一个较强的传统立体深度
+  baseline。
+\item
+  其关键优势在于：高可靠的稀疏 SIFT
+  匹配能够为稠密代价体提供结构先验，尤其在纹理较清晰的区域效果明显。
+\item
+  从视觉上看，O3 往往比 O4 保留更多细节，例如 \texttt{artroom2}
+  的花束边缘和 \texttt{ladder1} 的梯子杆件。
+\item
+  代价是结果密度偏低。左右一致性和局部支持过滤会删除许多不确定像素，因此图中会出现较多黑色无效区域。
+\item
+  \texttt{podium1}
+  是最明显的失败场景，其误差远高于数据集中位数，说明某些复杂结构仍会破坏匹配假设。
+\item
+  从测试角度看，场景级指标表证明该方法已在全部评估场景上端到端运行，并生成了正式的
+  PFM 输出。
+\item
+  下一步可以引入更强的遮挡建模和自适应后处理，在保留细节的同时减少空洞。
+\end{itemize}
+
+\subsection{5. Objective 4: 基于 Vision Transformer
+风格模型的立体深度估计}\label{objective-4-ux57faux4e8e-vision-transformer-ux98ceux683cux6a21ux578bux7684ux7acbux4f53ux6df1ux5ea6ux4f30ux8ba1}
+
+\subsubsection{5.1 a. 流程图 /
+架构图}\label{a.-ux6d41ux7a0bux56fe-ux67b6ux6784ux56fe}
+
+\begin{center}
+\includegraphics[width=\linewidth]{EBU6307_ZIXI_YU_231223210/results/O4a_transformer/transformer_pipeline.jpg}
+\end{center}
+
+附录中同时保留了一份竖排放大的版本，便于看清细节。
+
+O4 的核心思想是用可训练的 token 描述子和轻量级 Transformer
+编码器替代手工 SIFT 描述子。当前实现采用自定义
+\texttt{StereoTokenTransformer}，定义于 \texttt{codes/o4.py} 和
+\texttt{codes/o4\_torch.py} 中，而不是直接调用大型现成 ViT
+模型。程序先将灰度立体图像划分为 2 x 2 patch
+token，并结合梯度与局部上下文构造 token 特征，再通过 Transformer
+编码得到左右图 token embedding，随后以余弦相似度构造 token 级 cost
+volume。
+
+与纯学习方法不同，O4 仍然复用了 O3
+中的结构化立体约束，但作用在 token grid 上：场景自适应视差范围、八方向
+SGM、带置信度边界的 token 左右一致性、anchor 引导的 token
+清理、加权中值修正以及 2 x 2 上采样回原始分辨率。因此，O4 实际上是 learned
+descriptor 与 classical stereo regularization 的组合。全部正式输出采用 5
+折交叉验证，并写入 \texttt{results/O4b\_transformer/} 与
+\texttt{results/O4c\_transformer/}。
+
+\subsubsection{5.2 b.
+三个生成示例}\label{b.-ux4e09ux4e2aux751fux6210ux793aux4f8b-3}
+
+\begin{center}
+\exampletriptychrow{EBU6307_ZIXI_YU_231223210/results/O4b_transformer/artroom2/disp0_transformer_raw.png}{1a}{(1a) raw}{EBU6307_ZIXI_YU_231223210/results/O4b_transformer/artroom2/disp0_transformer_raw_filtered.png}{1b}{(1b) raw filtered}{EBU6307_ZIXI_YU_231223210/results/O4b_transformer/artroom2/disp0.png}{1c}{(1c) final disparity}
+\vspace{0.6em}
+
+\exampletriptychrow{EBU6307_ZIXI_YU_231223210/results/O4b_transformer/chess3/disp0_transformer_raw.png}{2a}{(2a) raw}{EBU6307_ZIXI_YU_231223210/results/O4b_transformer/chess3/disp0_transformer_raw_filtered.png}{2b}{(2b) raw filtered}{EBU6307_ZIXI_YU_231223210/results/O4b_transformer/chess3/disp0.png}{2c}{(2c) final disparity}
+\vspace{0.6em}
+
+\exampletriptychrow{EBU6307_ZIXI_YU_231223210/results/O4b_transformer/ladder1/disp0_transformer_raw.png}{3a}{(3a) raw}{EBU6307_ZIXI_YU_231223210/results/O4b_transformer/ladder1/disp0_transformer_raw_filtered.png}{3b}{(3b) raw filtered}{EBU6307_ZIXI_YU_231223210/results/O4b_transformer/ladder1/disp0.png}{3c}{(3c) final disparity}
+\end{center}
+
+\textbf{Example 1：} \texttt{artroom2}，测试 fold = \textbf{1}，MAE =
+\textbf{2.2037}，RMSE = \textbf{6.5174}，Bad-1px =
+\textbf{0.3794}。raw token disparity 初始较噪，经过 raw filtered 和最终后处理后，结果比 O3 更稠密、更平滑。\\
+\textbf{Example 2：} \texttt{chess3}，测试 fold = \textbf{1}，MAE =
+\textbf{5.2626}，RMSE = \textbf{13.1028}，Bad-1px =
+\textbf{0.3145}。raw 与 raw filtered 图中已经能看到重复结构带来的歧义，这种困难在最终结果中仍然存在，因此误差显著升高。\\
+\textbf{Example 3：} \texttt{ladder1}，测试 fold = \textbf{0}，MAE =
+\textbf{1.9797}，RMSE = \textbf{3.7391}，Bad-1px =
+\textbf{0.4337}。梯子结构在 raw 和 raw filtered 图中已经较清楚，最终输出继续保持了这一结构，并且结果密度高于 O3。
+
+\subsubsection{5.3 c.~量化评估}\label{c.-ux91cfux5316ux8bc4ux4f30-3}
+
+完整场景级指标保存在
+\texttt{results/O4c\_transformer/metrics.csv}，折叠级交叉验证汇总保存在
+\texttt{results/O4c\_transformer/fold\_summary.csv}。
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Objective 4 汇总统计。} 基于 Transformer 的 O4 在 5 折交叉验证设置下的整体误差结果。}
+\label{tab:o4_stats_zh}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c}
+\reportdoubletoprule
+\theadc{统计量} & \theadc{数值} \\
+\midrule
+场景数量 & 24 \\
+交叉验证折数 & 5 \\
+平均 MAE & 3.3176 \\
+平均 RMSE & 8.1083 \\
+平均 Bad-1px & 0.3721 \\
+中位数 MAE & 2.4049 \\
+最优场景 & \texttt{skates2}，MAE 1.0481 \\
+最差场景 & \texttt{podium1}，MAE 12.7761 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Objective 4 各 fold 汇总。} 展示 Transformer 立体深度模型在每个交叉验证 fold 上的平均表现。}
+\label{tab:o4_folds_zh}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c c c c}
+\reportdoubletoprule
+\theadc{Fold} & \theadc{场景数} & \theadc{平均 MAE} & \theadc{平均 RMSE} & \theadc{平均 Bad-1px} \\
+\midrule
+0 & 5 & 3.5480 & 8.9336 & 0.4122 \\
+1 & 5 & 5.0527 & 11.0331 & 0.4554 \\
+2 & 5 & 2.4753 & 6.7348 & 0.3182 \\
+3 & 5 & 2.4646 & 6.1603 & 0.3522 \\
+4 & 4 & 2.9799 & 7.5726 & 0.3102 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{\textbf{Objective 4 示例结果。} 三个 O4 展示样例对应的测试 fold 与误差指标。}
+\label{tab:o4_examples_zh}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c c c c}
+\reportdoubletoprule
+\theadc{示例场景} & \theadc{Fold} & \theadc{MAE} & \theadc{RMSE} & \theadc{Bad-1px} \\
+\midrule
+artroom2 & 1 & 2.2037 & 6.5174 & 0.3794 \\
+chess3 & 1 & 5.2626 & 13.1028 & 0.3145 \\
+ladder1 & 0 & 1.9797 & 3.7391 & 0.4337 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+\subsubsection{5.4 d.~讨论}\label{d.-ux8ba8ux8bba-3}
+
+\begin{itemize}
+\tightlist
+\item
+  O4 满足 PDF 中关于 Vision Transformer objective 的要求：使用基于
+  Transformer 的描述子编码器，并给出 5 折交叉验证结果。
+\item
+  与 O3 相比，O4
+  更进一步地把学习式描述子与结构化立体正则化结合在一起，设计上更复杂也更有研究意味。
+\item
+  O4 最明显的优势是输出密度更高。相比
+  O3，其视差图通常更平滑，黑色无效区域更少。
+\item
+  从量化结果看，O4 的平均 Bad-1px 略优于 O3（0.3721 对 0.3881），说明在
+  1 像素容忍阈值下有更多像素落在正确范围内。
+\item
+  但 O4 的平均 MAE 和 RMSE 都劣于 O3，说明当前轻量 Transformer
+  仍会在困难场景上产生更大的绝对误差。
+\item
+  \texttt{chess1}、\texttt{chess2}、\texttt{chess3} 以及尤其是
+  \texttt{podium1} 表明，重复结构和强歧义场景仍是当前 learned token
+  模型的弱项。
+\item
+  各 fold 的统计结果也显示模型稳定性还不够，fold 1 显著比其他折更难。
+\item
+  从实现角度看，该模型参数量仅 478,309，训练与 checkpoint
+  流程清晰，可复现实验过程。
+\item
+  下一步应加强 token 描述子的上下文表达与置信度过滤，使其保留 O4
+  的密集优势，同时降低困难场景的异常值。
+\end{itemize}
+
+\subsection{6. O3 与 O4 对比}\label{o3-ux4e0e-o4-ux5bf9ux6bd4}
+
+由于 O4 是 O3 的学习式替代方案，因此最关键的比较就是两者在同一组 24
+个场景上的表现差异。
+
+\begin{table}[H]
+\centering
+\caption{\textbf{O3 与 O4 对比。} 在同一组 24 个场景上对两种立体深度方法的核心指标进行总体比较。}
+\label{tab:o3_o4_compare_zh}
+\vspace{1mm}
+\small
+\renewcommand{\arraystretch}{1.03}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{c c c c}
+\reportdoubletoprule
+\theadc{指标} & \theadc{O3} & \theadc{O4} & \theadc{更优方法} \\
+\midrule
+平均 MAE & \textbf{2.3357} & 3.3176 & O3 \\
+平均 RMSE & \textbf{6.8212} & 8.1083 & O3 \\
+平均 Bad-1px & 0.3881 & \textbf{0.3721} & O4 \\
+MAE 胜出场景数 & \textbf{15} & 9 & O3 \\
+RMSE 胜出场景数 & \textbf{14} & 10 & O3 \\
+Bad-1px 胜出场景数 & 10 & \textbf{14} & O4 \\
+\bottomrule
+\specialrule{1pt}{1pt}{0pt}
+\end{tabular}
+\vspace{1mm}
+\end{table}
+
+这一对比表明，两种方法之间仍然存在清晰的性能权衡。O3
+在绝对视差精度方面仍然更强，尤其是在最困难的场景上更稳定；而 O4
+已经进一步缩小了 MAE 和 RMSE 的差距，同时提供了更稠密、更平滑的深度图，并在 1
+像素误差容忍下继续占优。换句话说，O4 已经更清楚地展现出 learned descriptor
+的潜力，但当前紧凑型 Transformer 在复杂场景上的泛化能力还不足以稳定超过
+O3 这一传统混合基线。
+
+\subsection{7. 结论}\label{ux7ed3ux8bba}
+
+本次 mini project 已经按照要求完成四个 objective
+的实现与提交结构整理。O1 成功生成具有较好结构相似性的合成立体图像；O2
+实现了完整的手写 SIFT 检测与描述流程，并给出了有意义的重复性结果；O3
+建立了一个较强的传统立体深度估计 baseline；O4 则进一步把项目扩展到基于
+Transformer 的学习式立体深度估计，并完成了 5 折交叉验证。
+
+本项目最重要的整体结论在于：它并不是简单地从``传统方法''跳到``深度学习方法''，而是形成了一个前后衔接的技术链条。O1
+负责受控合成，O2 验证局部特征稳定性，O3 将特征证据扩展为稠密几何，O4
+再测试可训练 token 描述子能否超越手工特征。当前阶段下，O3 仍在平均 MAE
+和 RMSE 上领先，而 O4 则在结果密度、Bad-1px
+以及绝对误差差距收窄方面表现出更明显的进步。这也为后续工作提供了明确方向：在保留 O4
+密集输出优势的同时，提高其在重复纹理和高歧义场景中的鲁棒性。
+
+\clearpage
+\appendix
+\section{附录：O2--O4 Pipeline 图}
+
+\subsection*{Objective 2 Pipeline 图}
+\appendixpipelinefigure{EBU6307_ZIXI_YU_231223210/results/O2a_sift/sift_pipeline.jpg}
+
+\clearpage
+\subsection*{Objective 3 Pipeline 图}
+\appendixpipelinefigure{EBU6307_ZIXI_YU_231223210/results/O3a_disparity/dep_pipeline.jpg}
+
+\clearpage
+\subsection*{Objective 4 Pipeline / Architecture Figure}
+\appendixpipelinefigure{EBU6307_ZIXI_YU_231223210/results/O4a_transformer/transformer_pipeline.jpg}
+
+\end{document}
