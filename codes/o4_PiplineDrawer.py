@@ -581,7 +581,7 @@ def create_o4_pipeline_image(path: Path) -> None:
         (matrix, "Calculate score matrix S\n(Z_L, Z_R^T)"),
         (cost, "Token cost volume = -S\n(higher similarity -> lower cost)"),
         (mask_bound, "apply content mask\n+ token disparity bound"),
-        (sgm, "O3-style 4-direction SGM\non token grid"),
+        (sgm, "O3-style 8-direction SGM\non token grid"),
         (solve, "Left / right token disparity solve\n(Quadratic disparity regression)"),
         (raw, "Raw token diagnostics\n(raw_filtered)"),
     ]:
@@ -595,15 +595,19 @@ def create_o4_pipeline_image(path: Path) -> None:
             title_bold=box in {left_emb, right_emb, sim, matrix, cost, mask_bound, sgm, solve, raw},
         )
 
-    lr = (1615, 108, 1808, 173)
-    clean = (1633, 217, 1790, 304)
-    fill = (1633, 348, 1790, 413)
-    upsample = (1633, 456, 1790, 558)
+    lr = (1615, 78, 1808, 135)
+    raw_anchor = (1615, 163, 1808, 220)
+    clean = (1615, 248, 1808, 305)
+    anchor_fill = (1615, 333, 1808, 390)
+    upsample = (1615, 418, 1808, 475)
+    pixel_filter = (1615, 503, 1808, 570)
     for box, label in [
-        (lr, "Token LR consistency + confidence margin\n(consistency_threshold = 1.0)"),
-        (clean, "Token cleanup\n(token_median_filter_size = 3\nspeckle_max_size = 150\nspeckle_max_diff = 1.0)"),
-        (fill, "O3-style fill + weighted median\n(fill_invalid_passes = 2)"),
+        (lr, "Token LR consistency \n+ confidence margin\n(consistency_threshold = 1.0)"),
+        (raw_anchor, "Raw-filtered anchor selection\nmargin floor + local support"),
+        (clean, "O3-style token cleanup\nmedian + custom speckle CC"),
+        (anchor_fill, "Anchor-guided token correction\n+ weighted median fill"),
         (upsample, "Upsample token disparity\nto full resolution\n(2 px/token)"),
+        (pixel_filter, "Final pixel cleanup\ncontent mask\nedge / occlusion rejection\ncustom speckle CC"),
     ]:
         _draw_box(painter, box, label, small_font, (255, 228, 228), red, title_bold=True)
 
@@ -695,15 +699,17 @@ def create_o4_pipeline_image(path: Path) -> None:
     _draw_arrow(painter, [_bottom_center(sgm), _top_center(solve)])
     _draw_arrow(painter, [_bottom_center(solve), _top_center(raw)])
     _draw_arrow(painter, [_right_center(solve), (1542, _center_y(solve)), (1542, _center_y(lr)), _left_center(lr)])
-    _draw_arrow(painter, [_bottom_center(lr), _top_center(clean)])
-    _draw_arrow(painter, [_bottom_center(clean), _top_center(fill)])
-    _draw_arrow(painter, [_bottom_center(fill), _top_center(upsample)])
-    _draw_arrow(painter, [_right_center(upsample), (1810, _center_y(upsample)), (1810, _center_y(out1)), _left_center(out1)])
-    _draw_arrow(painter, [_right_center(upsample), (1810, _center_y(upsample)), (1810, _center_y(out2)), _left_center(out2)])
+    _draw_arrow(painter, [_bottom_center(lr), _top_center(raw_anchor)])
+    _draw_arrow(painter, [_bottom_center(raw_anchor), _top_center(clean)])
+    _draw_arrow(painter, [_bottom_center(clean), _top_center(anchor_fill)])
+    _draw_arrow(painter, [_bottom_center(anchor_fill), _top_center(upsample)])
+    _draw_arrow(painter, [_bottom_center(upsample), _top_center(pixel_filter)])
+    _draw_arrow(painter, [_right_center(pixel_filter), (1822, _center_y(pixel_filter)), (1822, _center_y(out1)), _left_center(out1)])
+    _draw_arrow(painter, [_right_center(pixel_filter), (1822, _center_y(pixel_filter)), (1822, _center_y(out2)), _left_center(out2)])
     _draw_arrow(painter, [_right_center(raw), (1875, _center_y(raw)), (1875, _center_y(out3)), _left_center(out3)])
     _draw_arrow(painter, [_right_center(raw), (1875, _center_y(raw)), (1875, _center_y(out2)), _left_center(out2)])
     _draw_arrow(painter, [_bottom_center(mask), (_center_x(mask), 656), (1308, 656), (1308, _center_y(cost)), _left_center(cost)])
-    _draw_arrow(painter, [_bottom_center(mask), (_center_x(mask), 656), (_center_x(upsample), 656), _bottom_center(upsample)])
+    _draw_arrow(painter, [_bottom_center(mask), (_center_x(mask), 656), (_center_x(pixel_filter), 656), _bottom_center(pixel_filter)])
 
     painter.end()
     path.parent.mkdir(parents=True, exist_ok=True)

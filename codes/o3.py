@@ -1505,6 +1505,70 @@ def accumulate_sgm_axis_torch(cost_volume: Any, guide_gray: Any, output: Any, ax
         previous = current
 
 
+def _sgm_diagonal_starts(height: int, width: int, row_step: int, col_step: int) -> tuple[Any, Any]:
+    row_border = 0 if row_step > 0 else height - 1
+    col_border = 0 if col_step > 0 else width - 1
+    row_starts_r = np.full(width, row_border, dtype=np.int64)
+    row_starts_c = np.arange(width, dtype=np.int64)
+    column_rows = np.arange(height, dtype=np.int64)
+    column_rows = column_rows[column_rows != row_border]
+    column_starts_r = column_rows
+    column_starts_c = np.full(column_rows.shape, col_border, dtype=np.int64)
+    return (
+        np.concatenate((row_starts_r, column_starts_r), axis=0),
+        np.concatenate((row_starts_c, column_starts_c), axis=0),
+    )
+
+
+def accumulate_sgm_diagonal_torch(
+    cost_volume: Any,
+    guide_gray: Any,
+    output: Any,
+    row_step: int,
+    col_step: int,
+    p1: float,
+    p2: float,
+) -> None:
+    source = cost_volume
+    guide = guide_gray.to(dtype=torch.float32)
+    height, width, _ = source.shape
+    start_rows_np, start_cols_np = _sgm_diagonal_starts(int(height), int(width), int(row_step), int(col_step))
+    start_rows = torch.as_tensor(start_rows_np, dtype=torch.long, device=source.device)
+    start_cols = torch.as_tensor(start_cols_np, dtype=torch.long, device=source.device)
+    previous = source[start_rows, start_cols, :].to(dtype=torch.float32)
+    output[start_rows, start_cols, :].add_(previous)
+
+    infinity = torch.tensor(1e9, dtype=torch.float32, device=source.device)
+    edge_scale = torch.tensor(8.0, dtype=torch.float32, device=source.device)
+    minimum_jump = torch.tensor(max(float(p1) * 2.0, 1.0), dtype=torch.float32, device=source.device)
+    max_steps = max(int(height), int(width))
+    for step_index in range(1, max_steps):
+        rows = start_rows + (int(row_step) * step_index)
+        cols = start_cols + (int(col_step) * step_index)
+        active = (rows >= 0) & (rows < int(height)) & (cols >= 0) & (cols < int(width))
+        if not bool(torch.any(active).detach().cpu().item()):
+            continue
+        active_rows = rows[active]
+        active_cols = cols[active]
+        previous_rows = active_rows - int(row_step)
+        previous_cols = active_cols - int(col_step)
+        previous_values = previous[active]
+        edge_delta = torch.abs(guide[active_rows, active_cols] - guide[previous_rows, previous_cols])[:, None]
+        adaptive_p2 = torch.maximum(minimum_jump, float(p2) / (1.0 + (edge_delta / edge_scale)))
+        previous_min = previous_values.min(dim=1, keepdim=True).values
+        from_lower = torch.empty_like(previous_values)
+        from_upper = torch.empty_like(previous_values)
+        from_lower[:, 0] = infinity
+        from_lower[:, 1:] = previous_values[:, :-1] + float(p1)
+        from_upper[:, :-1] = previous_values[:, 1:] + float(p1)
+        from_upper[:, -1] = infinity
+        jump_cost = previous_min + adaptive_p2
+        transition = torch.minimum(torch.minimum(previous_values, from_lower), torch.minimum(from_upper, jump_cost))
+        current = source[active_rows, active_cols, :].to(dtype=torch.float32) + transition - previous_min
+        output[active_rows, active_cols, :].add_(current)
+        previous[active] = current
+
+
 def aggregate_sgm_axis_torch(cost_volume: Any, guide_gray: Any, axis: int, reverse: bool, p1: float, p2: float) -> Any:
     aggregated = torch.zeros(cost_volume.shape, dtype=torch.float32, device=cost_volume.device)
     accumulate_sgm_axis_torch(cost_volume, guide_gray, aggregated, axis=axis, reverse=reverse, p1=p1, p2=p2)
@@ -1554,6 +1618,10 @@ def solve_sgm_from_cost_torch(
         accumulate_sgm_axis_torch(cost, reference, aggregated, axis=1, reverse=True, p1=p1, p2=p2)
         accumulate_sgm_axis_torch(cost, reference, aggregated, axis=0, reverse=False, p1=p1, p2=p2)
         accumulate_sgm_axis_torch(cost, reference, aggregated, axis=0, reverse=True, p1=p1, p2=p2)
+        accumulate_sgm_diagonal_torch(cost, reference, aggregated, row_step=1, col_step=1, p1=p1, p2=p2)
+        accumulate_sgm_diagonal_torch(cost, reference, aggregated, row_step=1, col_step=-1, p1=p1, p2=p2)
+        accumulate_sgm_diagonal_torch(cost, reference, aggregated, row_step=-1, col_step=1, p1=p1, p2=p2)
+        accumulate_sgm_diagonal_torch(cost, reference, aggregated, row_step=-1, col_step=-1, p1=p1, p2=p2)
 
         best_index = torch.argmin(aggregated, dim=2).to(dtype=torch.int64)
         best = (best_index.to(dtype=torch.float32) + float(max(0, int(min_disparity)))).to(dtype=torch.float32)
@@ -1676,6 +1744,54 @@ def accumulate_sgm_axis(cost_volume: Any, guide_gray: Any, output: Any, axis: in
         previous = current
 
 
+def accumulate_sgm_diagonal(
+    cost_volume: Any,
+    guide_gray: Any,
+    output: Any,
+    row_step: int,
+    col_step: int,
+    p1: float,
+    p2: float,
+) -> None:
+    source = np.asarray(cost_volume, dtype=np.float32)
+    guide = np.asarray(guide_gray, dtype=np.float32)
+    aggregated = np.asarray(output, dtype=np.float32)
+    height, width, _ = source.shape
+    start_rows, start_cols = _sgm_diagonal_starts(int(height), int(width), int(row_step), int(col_step))
+    previous = source[start_rows, start_cols, :].copy()
+    aggregated[start_rows, start_cols, :] += previous
+
+    infinity = np.float32(1e9)
+    edge_scale = np.float32(8.0)
+    minimum_jump = np.float32(max(float(p1) * 2.0, 1.0))
+    max_steps = max(int(height), int(width))
+    for step_index in range(1, max_steps):
+        rows = start_rows + (int(row_step) * step_index)
+        cols = start_cols + (int(col_step) * step_index)
+        active = (rows >= 0) & (rows < height) & (cols >= 0) & (cols < width)
+        if not bool(np.any(active)):
+            continue
+        active_rows = rows[active]
+        active_cols = cols[active]
+        previous_rows = active_rows - int(row_step)
+        previous_cols = active_cols - int(col_step)
+        previous_values = previous[active]
+        edge_delta = np.abs(guide[active_rows, active_cols] - guide[previous_rows, previous_cols])[:, None]
+        adaptive_p2 = np.maximum(minimum_jump, float(p2) / (1.0 + (edge_delta / edge_scale)))
+        previous_min = previous_values.min(axis=1, keepdims=True)
+        from_lower = np.empty_like(previous_values)
+        from_upper = np.empty_like(previous_values)
+        from_lower[:, 0] = infinity
+        from_lower[:, 1:] = previous_values[:, :-1] + p1
+        from_upper[:, :-1] = previous_values[:, 1:] + p1
+        from_upper[:, -1] = infinity
+        jump_cost = np.broadcast_to(previous_min + adaptive_p2, previous_values.shape)
+        transition = np.minimum.reduce((previous_values, from_lower, from_upper, jump_cost))
+        current = source[active_rows, active_cols, :] + transition - previous_min
+        aggregated[active_rows, active_cols, :] += current
+        previous[active] = current
+
+
 def solve_sgm_direction(
     reference_gray: Any,
     target_gray: Any,
@@ -1737,6 +1853,10 @@ def solve_sgm_from_cost(
     accumulate_sgm_axis(cost, reference, aggregated, axis=1, reverse=True, p1=p1, p2=p2)
     accumulate_sgm_axis(cost, reference, aggregated, axis=0, reverse=False, p1=p1, p2=p2)
     accumulate_sgm_axis(cost, reference, aggregated, axis=0, reverse=True, p1=p1, p2=p2)
+    accumulate_sgm_diagonal(cost, reference, aggregated, row_step=1, col_step=1, p1=p1, p2=p2)
+    accumulate_sgm_diagonal(cost, reference, aggregated, row_step=1, col_step=-1, p1=p1, p2=p2)
+    accumulate_sgm_diagonal(cost, reference, aggregated, row_step=-1, col_step=1, p1=p1, p2=p2)
+    accumulate_sgm_diagonal(cost, reference, aggregated, row_step=-1, col_step=-1, p1=p1, p2=p2)
 
     best_index = np.argmin(aggregated, axis=2).astype(np.int32)
     best = (best_index + max(0, int(min_disparity))).astype(np.float32)

@@ -282,7 +282,7 @@ def create_o3_pipeline_image(path: Path) -> None:
 
     for box, label in [
         (cost, "Census + gradient matching cost"),
-        (sgm, "Four-direction SGM aggregation"),
+        (sgm, "Eight-direction SGM aggregation"),
         (solve, "Left / right disparity solve"),
     ]:
         _draw_box(painter, box, label, small_font, dense_style["node"], dense_style["outline"])

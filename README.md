@@ -67,7 +67,7 @@ python codes/o3.py --dry-run
 python codes/o3.py --validate-results
 ```
 
-O3 使用 SIFT+SGM 混合路径：先用 manual SIFT 描述符做 ratio/mutual/stereo geometry 筛选，记录可靠立体特征支持并生成 SIFT 种子视差先验；正式 `disp0.pfm` 再由 census+gradient 像素代价体和四方向 SGM 生成，并用 SIFT 匹配数量与种子先验调节稀疏/重复纹理场景的置信过滤和局部恢复。`disp0.png` 是 RGB 深度伪彩色预览，黑色表示无效视差。
+O3 使用 SIFT+SGM 混合路径：先用 manual SIFT 描述符做 ratio/mutual/stereo geometry 筛选，记录可靠立体特征支持并生成 SIFT 种子视差先验；正式 `disp0.pfm` 再由 census+gradient 像素代价体和八方向 SGM 生成，并用 SIFT 匹配数量与种子先验调节稀疏/重复纹理场景的置信过滤和局部恢复。`disp0.png` 是 RGB 深度伪彩色预览，黑色表示无效视差。
 
 ### O4
 

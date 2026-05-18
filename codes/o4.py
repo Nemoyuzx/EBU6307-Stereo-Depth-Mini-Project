@@ -35,7 +35,6 @@ from o3 import (
     filter_speckles,
     joint_weighted_median_filter_disparity,
     left_right_consistency_error,
-    left_right_consistency_mask,
     local_disparity_support_mask,
     median_filter_2d,
     solve_sgm_from_cost,
@@ -50,7 +49,6 @@ from o4_torch import (
     encode_o4_descriptors_torch,
     extract_baseline_patch_tokens_torch,
     is_cuda_device_name,
-    left_right_consistency_mask_torch,
     median_filter_2d_torch,
     predict_token_disparity_torch,
     refine_token_disparity_torch,
@@ -839,6 +837,144 @@ def cleanup_o4_token_disparity_like_o3(
     return np.where(mask & np.isfinite(best) & (best > 0), best, 0.0).astype(np.float32)
 
 
+def _o4_margin_floor(margin: Any, valid_mask: Any, minimum: float, percentile: float) -> float:
+    values = np.asarray(margin, dtype=np.float32)
+    valid = np.asarray(valid_mask, dtype=bool) & np.isfinite(values) & (values > 0)
+    if not bool(np.any(valid)):
+        return 0.0
+    return max(float(minimum), float(np.percentile(values[valid], float(percentile))))
+
+
+def build_o4_raw_anchor_disparity(
+    left_disparity: Any,
+    right_disparity: Any,
+    confidence: Any,
+    guide_gray: Any,
+    content_mask: Any,
+    config: O4Config,
+) -> tuple[Any, float, int]:
+    """Build a sparse but high-trust token disparity anchor from raw Transformer matches."""
+
+    source = to_numpy_float32(left_disparity)
+    right = to_numpy_float32(right_disparity)
+    conf = to_numpy_float32(confidence)
+    mask = np.asarray(content_mask, dtype=bool)
+    guide = np.asarray(guide_gray, dtype=np.float32)
+    if source.shape != right.shape or source.shape != mask.shape:
+        return np.zeros(mask.shape, dtype=np.float32), 0.0, 0
+    if conf.shape != source.shape:
+        conf = np.zeros_like(source, dtype=np.float32)
+    if guide.shape != source.shape:
+        guide = cv2.resize(guide.astype(np.float32), (source.shape[1], source.shape[0]), interpolation=cv2.INTER_AREA)
+
+    valid = mask & np.isfinite(source) & (source > 0)
+    if not bool(np.any(valid)):
+        return np.zeros_like(source, dtype=np.float32), 0.0, 0
+
+    confidence_floor = _o4_margin_floor(conf, valid, float(config.min_confidence), 20.0)
+    confidence_mask = np.ones_like(valid, dtype=bool) if confidence_floor <= 0 else conf >= confidence_floor
+    consistency_error = left_right_consistency_error(source, right)
+    strict_limit = max(0.75, float(config.consistency_threshold))
+    relaxed_limit = max(strict_limit + 0.5, 1.5)
+
+    strict_candidates = valid & confidence_mask & (consistency_error <= strict_limit)
+    strict_support = local_disparity_support_mask(
+        source,
+        strict_candidates,
+        radius=2,
+        tolerance=1.25,
+        min_count=4,
+    )
+    relaxed_candidates = valid & confidence_mask & (consistency_error <= relaxed_limit)
+    relaxed_support = local_disparity_support_mask(
+        source,
+        relaxed_candidates,
+        radius=2,
+        tolerance=1.75,
+        min_count=3,
+    )
+    anchor_mask = strict_support | (relaxed_support & ~strict_support)
+    anchors = np.where(anchor_mask, source, 0.0).astype(np.float32)
+    if not bool(np.any(anchors > 0)):
+        return anchors, confidence_floor, 0
+
+    anchors = joint_weighted_median_filter_disparity(
+        anchors,
+        guide,
+        radius=1,
+        sigma_color=6.0,
+        sigma_space=1.0,
+    )
+    anchors = np.where(anchor_mask & np.isfinite(anchors) & (anchors > 0), anchors, 0.0).astype(np.float32)
+    return anchors, confidence_floor, int(np.count_nonzero(anchors > 0))
+
+
+def _o4_close_support_counts(disparity: Any, support_disparity: Any, radius: int, tolerance: float) -> tuple[Any, Any]:
+    source = np.asarray(disparity, dtype=np.float32)
+    support = np.asarray(support_disparity, dtype=np.float32)
+    support_mask = np.isfinite(support) & (support > 0)
+    if radius <= 0:
+        close = support_mask & (np.abs(support - source) <= float(tolerance))
+        return close.astype(np.int16), support_mask.astype(np.int16)
+
+    kernel_size = (int(radius) * 2) + 1
+    padded_support = np.pad(support, ((radius, radius), (radius, radius)), mode="edge")
+    padded_mask = np.pad(support_mask, ((radius, radius), (radius, radius)), mode="constant")
+    support_windows = np.lib.stride_tricks.sliding_window_view(padded_support, (kernel_size, kernel_size))
+    mask_windows = np.lib.stride_tricks.sliding_window_view(padded_mask, (kernel_size, kernel_size))
+    close_windows = mask_windows & (np.abs(support_windows - source[:, :, None, None]) <= float(tolerance))
+    return (
+        np.sum(close_windows, axis=(-2, -1)).astype(np.int16),
+        np.sum(mask_windows, axis=(-2, -1)).astype(np.int16),
+    )
+
+
+def build_o4_anchor_guided_token_disparity(
+    sgm_disparity: Any,
+    raw_anchor_disparity: Any,
+    guide_gray: Any,
+    content_mask: Any,
+    margin: Any | None,
+    config: O4Config,
+) -> Any:
+    """Use raw anchors as a conservative veto for low-confidence SGM tokens."""
+
+    source = to_numpy_float32(sgm_disparity)
+    anchors = to_numpy_float32(raw_anchor_disparity)
+    mask = np.asarray(content_mask, dtype=bool)
+    guide = np.asarray(guide_gray, dtype=np.float32)
+    if source.shape != anchors.shape or source.shape != mask.shape:
+        return np.where(mask & np.isfinite(source) & (source > 0), source, 0.0).astype(np.float32)
+    if guide.shape != source.shape:
+        guide = cv2.resize(guide.astype(np.float32), (source.shape[1], source.shape[0]), interpolation=cv2.INTER_AREA)
+
+    source_valid = mask & np.isfinite(source) & (source > 0)
+    anchor_mask = mask & np.isfinite(anchors) & (anchors > 0)
+    if not bool(np.any(source_valid)):
+        return np.zeros_like(source, dtype=np.float32)
+    if not bool(np.any(anchor_mask)):
+        return np.where(source_valid, source, 0.0).astype(np.float32)
+
+    close_count, anchor_count = _o4_close_support_counts(
+        source,
+        np.where(anchor_mask, anchors, 0.0),
+        radius=3,
+        tolerance=max(2.0, float(config.consistency_threshold) + 1.0),
+    )
+
+    if margin is None:
+        margin_source = np.zeros_like(source, dtype=np.float32)
+    else:
+        margin_source = to_numpy_float32(margin)
+        if margin_source.shape != source.shape:
+            margin_source = np.zeros_like(source, dtype=np.float32)
+    margin_floor = _o4_margin_floor(margin_source, source_valid, 0.0, 15.0)
+    low_margin = (margin_floor > 0) & (margin_source < margin_floor)
+    unsupported_by_nearby_anchor = (anchor_count >= 5) & (close_count == 0)
+    fused = np.where(source_valid & ~(low_margin & unsupported_by_nearby_anchor), source, 0.0).astype(np.float32)
+    return np.where(mask & np.isfinite(fused) & (fused > 0), fused, 0.0).astype(np.float32)
+
+
 def token_mask_bbox(mask: Any) -> tuple[int, int, int, int] | None:
     source = np.asarray(mask, dtype=bool)
     locations = np.argwhere(source)
@@ -1013,43 +1149,165 @@ def filter_token_speckles(disparity: Any, max_speckle_size: int, max_diff: float
     fixed_scale = 16.0
     fixed_disparity = np.where(valid, np.rint(source * fixed_scale), 0.0).astype(np.int16)
     fixed_max_diff = max(1, int(round(float(max_diff) * fixed_scale)))
-    try:
-        cv2.filterSpeckles(fixed_disparity, 0, int(max_speckle_size), fixed_max_diff)
-        cleaned = fixed_disparity.astype(np.float32) / fixed_scale
-    except cv2.error:
-        cleaned = source
-        cleaned_valid = valid.copy()
-        rounded = np.where(valid, np.rint(source).astype(np.int32), -1)
-        visited = np.zeros_like(valid, dtype=bool)
-        token_height, token_width = source.shape
-        for row_index in range(token_height):
-            for column_index in range(token_width):
-                if not valid[row_index, column_index] or visited[row_index, column_index]:
-                    continue
-                seed_value = rounded[row_index, column_index]
-                stack = [(row_index, column_index)]
-                component: list[tuple[int, int]] = []
-                while stack:
-                    pixel = stack.pop()
-                    if visited[pixel]:
-                        continue
-                    visited[pixel] = True
-                    if not valid[pixel] or abs(rounded[pixel] - seed_value) > int(max_diff):
-                        continue
-                    component.append(pixel)
-                    pixel_row, pixel_col = pixel
-                    for delta_row, delta_col in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                        neighbor_row = pixel_row + delta_row
-                        neighbor_col = pixel_col + delta_col
-                        if 0 <= neighbor_row < token_height and 0 <= neighbor_col < token_width:
-                            if not visited[neighbor_row, neighbor_col]:
-                                stack.append((neighbor_row, neighbor_col))
-                if len(component) <= int(max_speckle_size):
-                    for pixel in component:
-                        cleaned_valid[pixel] = False
-        cleaned = np.where(cleaned_valid, source, 0.0).astype(np.float32)
+    cleaned = filter_o4_speckles_connected_components(
+        fixed_disparity,
+        max_speckle_size=int(max_speckle_size),
+        max_diff=fixed_max_diff,
+    ).astype(np.float32) / fixed_scale
     cleaned = np.where(np.isfinite(cleaned) & (cleaned > 0), cleaned, 0.0).astype(np.float32)
     return cleaned
+
+
+def filter_o4_speckles_connected_components(disparity_fixed: Any, max_speckle_size: int, max_diff: int) -> Any:
+    """Pure NumPy/Python replacement for OpenCV filterSpeckles on fixed-point disparity."""
+
+    fixed = np.asarray(disparity_fixed).copy()
+    if fixed.ndim != 2 or int(max_speckle_size) <= 0:
+        return fixed
+
+    height, width = fixed.shape
+    flat = fixed.reshape(-1)
+    valid = flat > 0
+    visited = np.zeros(flat.shape, dtype=bool)
+    remove_value = np.asarray(0, dtype=fixed.dtype).item()
+    disparity_limit = max(0, int(max_diff))
+    max_size = int(max_speckle_size)
+
+    for start_index in range(flat.size):
+        if visited[start_index] or not valid[start_index]:
+            continue
+
+        seed_value = int(flat[start_index])
+        stack = [start_index]
+        visited[start_index] = True
+        component: list[int] = []
+        keep_component_pixels = True
+
+        while stack:
+            current_index = stack.pop()
+            if keep_component_pixels:
+                component.append(current_index)
+                if len(component) > max_size:
+                    component.clear()
+                    keep_component_pixels = False
+
+            current_value = int(flat[current_index])
+            row_index = current_index // width
+            column_index = current_index - (row_index * width)
+
+            if row_index > 0:
+                neighbor_index = current_index - width
+                if (
+                    not visited[neighbor_index]
+                    and valid[neighbor_index]
+                    and min(abs(int(flat[neighbor_index]) - current_value), abs(int(flat[neighbor_index]) - seed_value)) <= disparity_limit
+                ):
+                    visited[neighbor_index] = True
+                    stack.append(neighbor_index)
+            if row_index + 1 < height:
+                neighbor_index = current_index + width
+                if (
+                    not visited[neighbor_index]
+                    and valid[neighbor_index]
+                    and min(abs(int(flat[neighbor_index]) - current_value), abs(int(flat[neighbor_index]) - seed_value)) <= disparity_limit
+                ):
+                    visited[neighbor_index] = True
+                    stack.append(neighbor_index)
+            if column_index > 0:
+                neighbor_index = current_index - 1
+                if (
+                    not visited[neighbor_index]
+                    and valid[neighbor_index]
+                    and min(abs(int(flat[neighbor_index]) - current_value), abs(int(flat[neighbor_index]) - seed_value)) <= disparity_limit
+                ):
+                    visited[neighbor_index] = True
+                    stack.append(neighbor_index)
+            if column_index + 1 < width:
+                neighbor_index = current_index + 1
+                if (
+                    not visited[neighbor_index]
+                    and valid[neighbor_index]
+                    and min(abs(int(flat[neighbor_index]) - current_value), abs(int(flat[neighbor_index]) - seed_value)) <= disparity_limit
+                ):
+                    visited[neighbor_index] = True
+                    stack.append(neighbor_index)
+
+        if keep_component_pixels and len(component) <= max_size:
+            flat[np.asarray(component, dtype=np.intp)] = remove_value
+            valid[np.asarray(component, dtype=np.intp)] = False
+
+    return fixed
+
+
+def filter_o4_final_pixel_speckles(disparity: Any, window_size: int = 4000, max_diff: float = 2.0) -> Any:
+    """Remove small full-resolution disparity islands that dominate O4 error maps."""
+
+    source = np.asarray(disparity, dtype=np.float32)
+    valid = np.isfinite(source) & (source > 0)
+    if int(window_size) <= 0 or not bool(np.any(valid)):
+        return np.where(valid, source, 0.0).astype(np.float32)
+
+    fixed_scale = 16.0
+    fixed = np.where(valid, np.rint(source * fixed_scale), 0.0).astype(np.int16)
+    fixed_max_diff = max(1, int(round(float(max_diff) * fixed_scale)))
+    cleaned = filter_o4_speckles_connected_components(
+        fixed,
+        max_speckle_size=int(window_size),
+        max_diff=fixed_max_diff,
+    ).astype(np.float32) / fixed_scale
+    return np.where(np.isfinite(cleaned) & (cleaned > 0), cleaned, 0.0).astype(np.float32)
+
+
+def filter_o4_occlusion_edge_pixels(
+    disparity: Any,
+    guide_gray: Any,
+    content_mask: Any,
+    *,
+    edge_percentile: float = 88.0,
+    min_disparity_jump: float = 6.0,
+    radius: int = 1,
+) -> Any:
+    """Suppress thin high-risk occlusion edges where image and disparity both jump."""
+
+    source = np.asarray(disparity, dtype=np.float32)
+    guide = np.asarray(guide_gray, dtype=np.float32)
+    mask = np.asarray(content_mask, dtype=bool)
+    valid = mask & np.isfinite(source) & (source > 0)
+    if not bool(np.any(valid)):
+        return np.zeros_like(source, dtype=np.float32)
+    if guide.shape != source.shape:
+        guide = cv2.resize(guide.astype(np.float32), (source.shape[1], source.shape[0]), interpolation=cv2.INTER_AREA)
+    if mask.shape != source.shape:
+        mask = np.ones_like(valid, dtype=bool)
+
+    gradient_x = np.zeros_like(guide, dtype=np.float32)
+    gradient_y = np.zeros_like(guide, dtype=np.float32)
+    gradient_x[:, 1:-1] = 0.5 * np.abs(guide[:, 2:] - guide[:, :-2])
+    gradient_y[1:-1, :] = 0.5 * np.abs(guide[2:, :] - guide[:-2, :])
+    guide_gradient = gradient_x + gradient_y
+    gradient_values = guide_gradient[valid & np.isfinite(guide_gradient)]
+    if gradient_values.size == 0:
+        return np.where(valid, source, 0.0).astype(np.float32)
+    edge_floor = float(np.percentile(gradient_values, float(edge_percentile)))
+    strong_image_edge = valid & (guide_gradient >= edge_floor)
+
+    disparity_for_filters = np.where(valid, source, np.nan).astype(np.float32)
+    footprint_size = (int(radius) * 2) + 1
+    local_max = ndimage.maximum_filter(
+        np.where(valid, disparity_for_filters, -np.inf),
+        size=footprint_size,
+        mode="nearest",
+    )
+    local_min = ndimage.minimum_filter(
+        np.where(valid, disparity_for_filters, np.inf),
+        size=footprint_size,
+        mode="nearest",
+    )
+    disparity_jump = np.isfinite(local_max) & np.isfinite(local_min) & ((local_max - local_min) >= float(min_disparity_jump))
+    edge_risk = strong_image_edge & disparity_jump
+    if bool(np.any(edge_risk)):
+        edge_risk = ndimage.binary_dilation(edge_risk, structure=np.ones((3, 3), dtype=bool), iterations=1) & valid
+    return np.where(valid & ~edge_risk, source, 0.0).astype(np.float32)
 
 
 def guided_smooth_o4_preview(disparity: Any, guide_gray: Any) -> Any:
@@ -1562,6 +1820,8 @@ def run(
         display_source_disparity = None
         raw_transformer_disparity = None
         filtered_raw_transformer_disparity = None
+        raw_anchor_confidence_floor = 0.0
+        raw_anchor_token_count = 0
 
         if fallback_used:
             fallback_downsample_factor = max(config.downsample_factor, 2)
@@ -1798,28 +2058,6 @@ def run(
                     payload["left_gray"].shape[1],
                     device=model_state.device,
                 ).detach().cpu().numpy().astype(np.float32)
-                raw_consistency_mask = left_right_consistency_mask_torch(
-                    raw_refined_token_disparity,
-                    raw_right_to_left_disparity,
-                    config.consistency_threshold,
-                    device=model_state.device,
-                ) & left_token_content_mask
-                raw_filtered_token_disparity = raw_refined_token_disparity.masked_fill(~raw_consistency_mask, 0.0).float()
-                if config.token_median_filter_size > 1:
-                    raw_token_mask = raw_filtered_token_disparity > 0
-                    raw_filtered = median_filter_2d_torch(
-                        raw_filtered_token_disparity,
-                        config.token_median_filter_size,
-                        device=model_state.device,
-                    )
-                    raw_filtered_token_disparity = raw_filtered.masked_fill(~raw_token_mask, 0.0).float()
-                filtered_raw_transformer_disparity = upsample_token_grid_torch(
-                    raw_filtered_token_disparity * float(token_span),
-                    token_span,
-                    payload["left_gray"].shape[0],
-                    payload["left_gray"].shape[1],
-                    device=model_state.device,
-                ).detach().cpu().numpy().astype(np.float32)
                 cleanup_shape = tuple(to_numpy_float32(refined_token_disparity).shape)
                 cleanup_guide_tokens = average_pool_gray(payload["left_gray"], token_span)[: cleanup_shape[0], : cleanup_shape[1]]
                 cleanup_content_mask = build_token_content_mask(
@@ -1827,9 +2065,31 @@ def run(
                     token_span,
                     cleanup_shape,
                 )
+                raw_anchor_token_disparity, raw_anchor_confidence_floor, raw_anchor_token_count = build_o4_raw_anchor_disparity(
+                    raw_refined_token_disparity,
+                    raw_right_to_left_disparity,
+                    token_confidence,
+                    cleanup_guide_tokens,
+                    cleanup_content_mask,
+                    config,
+                )
+                filtered_raw_transformer_disparity = upsample_token_grid(
+                    raw_anchor_token_disparity.astype(np.float32) * float(token_span),
+                    token_span,
+                    payload["left_gray"].shape[0],
+                    payload["left_gray"].shape[1],
+                ).astype(np.float32)
                 official_token_disparity = cleanup_o4_token_disparity_like_o3(
                     refined_token_disparity,
                     right_to_left_disparity,
+                    cleanup_guide_tokens,
+                    cleanup_content_mask,
+                    sgm_left_margin,
+                    config,
+                )
+                official_token_disparity = build_o4_anchor_guided_token_disparity(
+                    official_token_disparity,
+                    raw_anchor_token_disparity,
                     cleanup_guide_tokens,
                     cleanup_content_mask,
                     sgm_left_margin,
@@ -1963,26 +2223,32 @@ def run(
                     payload["left_gray"].shape[0],
                     payload["left_gray"].shape[1],
                 ).astype(np.float32)
-                raw_consistency_mask = left_right_consistency_mask(
+                cleanup_guide_tokens_np = average_pool_gray(payload["left_gray"], token_span)[: refined_token_disparity.shape[0], : refined_token_disparity.shape[1]]
+                raw_filtered_token_disparity, raw_anchor_confidence_floor, raw_anchor_token_count = build_o4_raw_anchor_disparity(
                     raw_refined_token_disparity,
                     raw_right_to_left_disparity.astype(np.float32),
-                    config.consistency_threshold,
-                ) & left_token_content_mask_np
-                raw_filtered_token_disparity = np.where(raw_consistency_mask, raw_refined_token_disparity, 0.0).astype(np.float32)
-                if config.token_median_filter_size > 1:
-                    raw_token_mask = raw_filtered_token_disparity > 0
-                    raw_filtered = median_filter_2d(raw_filtered_token_disparity, config.token_median_filter_size)
-                    raw_filtered_token_disparity = np.where(raw_token_mask, raw_filtered, 0.0).astype(np.float32)
+                    token_confidence,
+                    cleanup_guide_tokens_np,
+                    left_token_content_mask_np,
+                    config,
+                )
                 filtered_raw_transformer_disparity = upsample_token_grid(
                     raw_filtered_token_disparity.astype(np.float32) * float(token_span),
                     token_span,
                     payload["left_gray"].shape[0],
                     payload["left_gray"].shape[1],
                 ).astype(np.float32)
-                cleanup_guide_tokens_np = average_pool_gray(payload["left_gray"], token_span)[: refined_token_disparity.shape[0], : refined_token_disparity.shape[1]]
                 official_token_disparity = cleanup_o4_token_disparity_like_o3(
                     refined_token_disparity,
                     right_to_left_disparity.astype(np.float32),
+                    cleanup_guide_tokens_np,
+                    left_token_content_mask_np,
+                    left_margin_np,
+                    config,
+                )
+                official_token_disparity = build_o4_anchor_guided_token_disparity(
+                    official_token_disparity,
+                    raw_filtered_token_disparity,
                     cleanup_guide_tokens_np,
                     left_token_content_mask_np,
                     left_margin_np,
@@ -2018,7 +2284,9 @@ def run(
         disparity = display_source_disparity if display_source_disparity is not None else filtered_raw_transformer_disparity
         disparity = apply_content_mask(disparity, payload["left_content_mask"])
         disparity = np.where(np.isfinite(disparity) & (disparity > 0), disparity, 0.0).astype(np.float32)
-        reliable_confidence_floor = 0.0
+        disparity = filter_o4_occlusion_edge_pixels(disparity, payload["left_gray"], payload["left_content_mask"])
+        disparity = filter_o4_final_pixel_speckles(disparity, window_size=4000, max_diff=2.0)
+        reliable_confidence_floor = float(raw_anchor_confidence_floor)
         reliable_pixel_count = int(np.count_nonzero(disparity > 0))
         display_disparity = build_o4_preview_disparity(disparity, payload["left_gray"])
         display_disparity = apply_content_mask(display_disparity, payload["left_content_mask"])
@@ -2077,10 +2345,10 @@ def run(
                 "raw_transformer_disparity: disp0_transformer_raw.pfm",
                 "filtered_raw_transformer_disparity: disp0_transformer_raw_filtered.pfm",
                 "filtered_raw_transformer_preview: disp0_transformer_raw_filtered.png",
-                "filtered_raw_transformer_filtering: left_right_consistency_plus_token_median_without_fill",
-                "official_pfm_selection: o3_style_token_cleanup_from_transformer_sgm_prediction",
-                "official_pfm_confidence_filter_applied: no",
-                "official_pfm_lr_consistency_filter_applied: relaxed_o3_style_local_support",
+                "filtered_raw_transformer_filtering: raw_lr_consistency_plus_confidence_and_local_anchor_support",
+                "official_pfm_selection: o3_style_token_cleanup_anchor_guided_by_raw_filtered_matches",
+                "official_pfm_confidence_filter_applied: raw_anchor_margin_percentile",
+                "official_pfm_lr_consistency_filter_applied: raw_anchor_lr_plus_relaxed_o3_style_local_support",
                 f"disparity_regression: {config.disparity_regression}",
                 f"runtime_device: {training_state.device}",
                 f"model_dim: {config.model_dim}",
@@ -2096,6 +2364,9 @@ def run(
                 "content_mask_applied: yes",
                 f"official_pfm_confidence_floor: {reliable_confidence_floor:.6f}",
                 f"official_pfm_reliable_pixels: {reliable_pixel_count}",
+                f"raw_anchor_token_count: {raw_anchor_token_count}",
+                "final_occlusion_edge_filter: image_edge_p88_disparity_jump6px_radius1",
+                "final_pixel_speckle_filter: custom_connected_components_window4000_diff2px",
                 f"token_median_filter_size: {config.token_median_filter_size}",
                 f"speckle_max_size: {config.speckle_max_size}",
                 f"speckle_max_diff: {config.speckle_max_diff:.6f}",
@@ -2148,9 +2419,9 @@ def run(
                 "im1.png: original right image copied from the source scene",
                 "final_disparity_source: O4 transformer token prediction",
                 "sgm_detail_fusion_used: no",
-                "official_pfm_selection: o3_style_token_cleanup_from_transformer_sgm_prediction",
-                "official_pfm_confidence_filter_applied: no",
-                "official_pfm_lr_consistency_filter_applied: relaxed_o3_style_local_support",
+                "official_pfm_selection: o3_style_token_cleanup_anchor_guided_by_raw_filtered_matches",
+                "official_pfm_confidence_filter_applied: raw_anchor_margin_percentile",
+                "official_pfm_lr_consistency_filter_applied: raw_anchor_lr_plus_relaxed_o3_style_local_support",
                 f"disparity_regression: {config.disparity_regression}",
                 f"runtime_device: {training_state.device}",
                 f"training_samples: {training_sample_count}",
@@ -2158,6 +2429,9 @@ def run(
                 f"fallback_coarse_matcher_used: {'yes' if fallback_used else 'no'}",
                 f"official_pfm_confidence_floor: {reliable_confidence_floor:.6f}",
                 f"official_pfm_reliable_pixels: {reliable_pixel_count}",
+                f"raw_anchor_token_count: {raw_anchor_token_count}",
+                "final_occlusion_edge_filter: image_edge_p88_disparity_jump6px_radius1",
+                "final_pixel_speckle_filter: custom_connected_components_window4000_diff2px",
                 f"ground_truth_available: {'yes' if ground_truth_path.exists() else 'no'}",
                 f"mae: {metrics['mae'] if metrics['mae'] >= 0 else 'NA'}",
                 f"rmse: {metrics['rmse'] if metrics['rmse'] >= 0 else 'NA'}",
