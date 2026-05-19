@@ -1483,6 +1483,16 @@ def filter_dinov2_reliable_disparity(disparity: Any, confidence: Any, min_confid
     return np.where(reliable, source, 0.0).astype(np.float32), confidence_floor, int(np.count_nonzero(reliable))
 
 
+def apply_dinov2_o4_final_cleanup(disparity: Any, guide_gray: Any, content_mask: Any) -> Any:
+    from o4 import filter_o4_final_pixel_speckles, filter_o4_occlusion_edge_pixels
+
+    cleaned = _apply_content_mask(disparity, content_mask)
+    cleaned = np.where(np.isfinite(cleaned) & (cleaned > 0), cleaned, 0.0).astype(np.float32)
+    cleaned = filter_o4_occlusion_edge_pixels(cleaned, guide_gray, content_mask)
+    cleaned = filter_o4_final_pixel_speckles(cleaned, window_size=4000, max_diff=2.0)
+    return _apply_content_mask(cleaned, content_mask)
+
+
 def _resolve_run_device(config: Any) -> tuple[str, str]:
     torch = _require_torch()
 
@@ -1700,7 +1710,8 @@ def run_dinov2_objective(
             config.min_confidence,
             55.0,
         )
-        disparity = _apply_content_mask(disparity, left_content_mask)
+        disparity = apply_dinov2_o4_final_cleanup(disparity, left_gray, left_content_mask)
+        reliable_pixel_count = int(np.count_nonzero(disparity > 0))
         raw_disparity = _apply_content_mask(prediction.raw_disparity, left_content_mask)
         confidence = np.where(np.asarray(left_content_mask, dtype=bool), prediction.confidence, 0.0).astype(np.float32)
         disparity_scene_dir = config.disparity_dir / scene_dir.name
@@ -1711,7 +1722,7 @@ def run_dinov2_objective(
 
         write_pfm(disparity_scene_dir / "disp0.pfm", disparity)
         write_pfm(disparity_scene_dir / "disp0_transformer_raw.pfm", raw_disparity)
-        disparity_preview = colorize_disparity_depth_map(display_disparity, display_disparity > 0)
+        disparity_preview = colorize_disparity_depth_map(disparity, disparity > 0)
         raw_disparity_preview = colorize_disparity_depth_map(raw_disparity, raw_disparity > 0)
         write_png(disparity_scene_dir / "disp0.png", disparity_preview)
         write_png(disparity_scene_dir / "disp0_transformer_raw.png", raw_disparity_preview)
@@ -1762,7 +1773,9 @@ def run_dinov2_objective(
             "sgm_detail_fusion_used: yes",
             "raw_transformer_disparity: disp0_transformer_raw.pfm",
             "final_upsampling: weighted_bilinear_from_dinov2_sgm_patch_tokens",
-            "final_postprocess: confidence_weighted_guided_smoothing_from_dinov2_prediction",
+            "final_postprocess: confidence_weighted_guided_smoothing_plus_o4_edge_occlusion_and_custom_speckle_cleanup",
+            "final_occlusion_edge_filter: image_edge_p88_disparity_jump6px_radius1",
+            "final_pixel_speckle_filter: custom_connected_components_window4000_diff2px",
             f"official_pfm_confidence_floor: {reliable_confidence_floor:.6f}",
             f"official_pfm_reliable_pixels: {reliable_pixel_count}",
             f"disparity_regression: {config.disparity_regression}",

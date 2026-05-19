@@ -1,3 +1,4 @@
+% !TEX program = xelatex
 % Options for packages loaded elsewhere
 \PassOptionsToPackage{unicode}{hyperref}
 \PassOptionsToPackage{hyphens}{url}
@@ -709,41 +710,37 @@ ladder1 & 0 & 1.9797 & 3.7391 & 0.4337 \\
   的密集优势，同时降低困难场景的异常值。
 \end{itemize}
 
-\subsection{6. O3 与 O4 对比}\label{o3-ux4e0e-o4-ux5bf9ux6bd4}
+\subsection{6. O3、O4 与 DINOv2 对比}\label{o3-ux4e0e-o4-ux5bf9ux6bd4}
 
 由于 O4 是 O3 的学习式替代方案，因此最关键的比较就是两者在同一组 24
-个场景上的表现差异。
+个场景上的表现差异；同时，这里额外加入了预训练 DINOv2 测试，用来说明更强预训练特征带来的影响。
 
 \begin{table}[H]
 \centering
-\caption{\textbf{O3 与 O4 对比。} 在同一组 24 个场景上对两种立体深度方法的核心指标进行总体比较。}
+\caption{\textbf{O3、O4 与预训练 DINOv2 对比。} 在同一组 24 个场景上对三种结果的核心指标进行总体比较。}
 \label{tab:o3_o4_compare_zh}
 \vspace{1mm}
 \small
 \renewcommand{\arraystretch}{1.03}
-\setlength{\tabcolsep}{5pt}
-\begin{tabular}{c c c c}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{c c c c c}
 \reportdoubletoprule
-\theadc{指标} & \theadc{O3} & \theadc{O4} & \theadc{更优方法} \\
+\theadc{指标} & \theadc{O3} & \theadc{O4} & \theadc{DINOv2} & \theadc{最优方法} \\
 \midrule
-平均 MAE & \textbf{2.3357} & 3.3176 & O3 \\
-平均 RMSE & \textbf{6.8212} & 8.1083 & O3 \\
-平均 Bad-1px & 0.3881 & \textbf{0.3721} & O4 \\
-MAE 胜出场景数 & \textbf{15} & 9 & O3 \\
-RMSE 胜出场景数 & \textbf{14} & 10 & O3 \\
-Bad-1px 胜出场景数 & 10 & \textbf{14} & O4 \\
+平均 MAE & 2.3357 & 3.3176 & \textbf{2.1023} & DINOv2 \\
+平均 RMSE & 6.8212 & 8.1083 & \textbf{5.5086} & DINOv2 \\
+平均 Bad-1px & 0.3881 & 0.3721 & \textbf{0.2729} & DINOv2 \\
+平均有效预测比例 & 0.5316 & \textbf{0.8612} & 0.2035 & O4 \\
+MAE 胜出场景数 & 3 & 0 & \textbf{21} & DINOv2 \\
+RMSE 胜出场景数 & 4 & 1 & \textbf{19} & DINOv2 \\
+Bad-1px 胜出场景数 & 2 & 0 & \textbf{22} & DINOv2 \\
 \bottomrule
 \specialrule{1pt}{1pt}{0pt}
 \end{tabular}
 \vspace{1mm}
 \end{table}
 
-这一对比表明，两种方法之间仍然存在清晰的性能权衡。O3
-在绝对视差精度方面仍然更强，尤其是在最困难的场景上更稳定；而 O4
-已经进一步缩小了 MAE 和 RMSE 的差距，同时提供了更稠密、更平滑的深度图，并在 1
-像素误差容忍下继续占优。换句话说，O4 已经更清楚地展现出 learned descriptor
-的潜力，但当前紧凑型 Transformer 在复杂场景上的泛化能力还不足以稳定超过
-O3 这一传统混合基线。
+这一扩展对比表明，三种方法之间的权衡关系比原先更清楚。如果只看已成功预测像素上的误差，额外加入的预训练 DINOv2 测试结果明显最好：它在平均 MAE、RMSE 和 Bad-1px 上都是最低，并且在绝大多数场景中获胜。这说明在当前小数据场景下，强预训练特征确实非常有帮助。不过，它的平均 valid ratio 只有 0.2035，远低于 O4 的 0.8612 和 O3 的 0.5316，因此这些更优误差是在更小的有效预测像素子集上取得的。也就是说，O4 仍然是最稠密的学习式结果，而 O3 则仍然是在较高覆盖率前提下绝对视差精度更强的 baseline。同时也不能忽略 O3 在低置信区域仍然存在明显空洞，因此它当前的数值优势也需要谨慎理解：如果把这些空洞区域也按预测失败计入误差，O3 的有效误差还会进一步增加。总体来看，DINOv2 测试进一步证明了预训练 learned descriptor 的潜力，但当前紧凑型 Transformer 若想同时兼顾这种精度和稠密输出，仍然需要更多训练数据，以及例如 CNN 或 U-Net 一类更强的局部细节恢复模块。
 
 \subsection{7. 结论}\label{ux7ed3ux8bba}
 
@@ -755,10 +752,8 @@ Transformer 的学习式立体深度估计，并完成了 5 折交叉验证。
 
 本项目最重要的整体结论在于：它并不是简单地从``传统方法''跳到``深度学习方法''，而是形成了一个前后衔接的技术链条。O1
 负责受控合成，O2 验证局部特征稳定性，O3 将特征证据扩展为稠密几何，O4
-再测试可训练 token 描述子能否超越手工特征。当前阶段下，O3 仍在平均 MAE
-和 RMSE 上领先，而 O4 则在结果密度、Bad-1px
-以及绝对误差差距收窄方面表现出更明显的进步。这也为后续工作提供了明确方向：在保留 O4
-密集输出优势的同时，提高其在重复纹理和高歧义场景中的鲁棒性。
+再测试可训练 token 描述子能否超越手工特征。当前阶段下，额外引入的预训练 DINOv2 测试给出了最好的报告 MAE、RMSE 和 Bad-1px，这说明在当前小数据设置下，强预训练已经能够明显提升匹配质量。不过，这种精度优势是以很低的 valid ratio 为代价获得的，因此在同时要求高质量稠密预测时，它还不能直接视为最优整体方案。O3 仍然提供了覆盖率更高、误差较稳的手工特征基线，O4 则提供了最稠密的学习式输出；同时，O3 在部分困难区域仍会留下空洞，如果把这些缺失像素也纳入惩罚，其报告误差会比当前统计值更高。这也为后续工作提供了明确方向：在保留 O4
+密集输出优势的同时，继续复用 DINOv2 这类更强预训练、扩大训练数据规模，并加入 CNN 或 U-Net 一类更强的细节恢复模块，以提升边界和细结构解析效果，同时提高其在重复纹理和高歧义场景中的鲁棒性。
 
 \clearpage
 \appendix

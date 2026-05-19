@@ -785,45 +785,57 @@ ladder1 & 0 & 1.9797 & 3.7391 & 0.4337 \\
   keeps O4's density advantage while reducing the large-scene outliers.
 \end{itemize}
 
-\subsection{6. O3 and O4 Comparison}\label{o3-and-o4-comparison}
+\subsection{6. O3, O4, and DINOv2 Comparison}\label{o3-and-o4-comparison}
 
 Because O4 is designed as the learned alternative to O3, the most
 important comparison is between the classical and Transformer-based
-stereo systems on the same 24 scenes.
+stereo systems on the same 24 scenes, and an additional pretrained
+DINOv2 test is included to show the effect of stronger pretrained
+features.
 
 \begin{table}[H]
 \centering
-\caption{\textbf{Comparison between O3 and O4.} Aggregate metric comparison on the shared 24-scene benchmark, with better values highlighted in bold.}
+\caption{\textbf{Comparison between O3, O4, and pretrained DINOv2.} Aggregate metric comparison on the shared 24-scene benchmark, with better values highlighted in bold.}
 \label{tab:o3_o4_compare_en}
 \vspace{1mm}
 \small
 \renewcommand{\arraystretch}{1.03}
-\setlength{\tabcolsep}{5pt}
-\begin{tabular}{c c c c}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{c c c c c}
 \reportdoubletoprule
-\theadc{Metric} & \theadc{O3} & \theadc{O4} & \theadc{Better objective} \\
+\theadc{Metric} & \theadc{O3} & \theadc{O4} & \theadc{DINOv2} & \theadc{Best method} \\
 \midrule
-Mean MAE & \textbf{2.3357} & 3.3176 & O3 \\
-Mean RMSE & \textbf{6.8212} & 8.1083 & O3 \\
-Mean Bad-1px & 0.3881 & \textbf{0.3721} & O4 \\
-Scene wins by MAE & \textbf{15} & 9 & O3 \\
-Scene wins by RMSE & \textbf{14} & 10 & O3 \\
-Scene wins by Bad-1px & 10 & \textbf{14} & O4 \\
+Mean MAE & 2.3357 & 3.3176 & \textbf{2.1023} & DINOv2 \\
+Mean RMSE & 6.8212 & 8.1083 & \textbf{5.5086} & DINOv2 \\
+Mean Bad-1px & 0.3881 & 0.3721 & \textbf{0.2729} & DINOv2 \\
+Mean valid ratio & 0.5316 & \textbf{0.8612} & 0.2035 & O4 \\
+Scene wins by MAE & 3 & 0 & \textbf{21} & DINOv2 \\
+Scene wins by RMSE & 4 & 1 & \textbf{19} & DINOv2 \\
+Scene wins by Bad-1px & 2 & 0 & \textbf{22} & DINOv2 \\
 \bottomrule
 \specialrule{1pt}{1pt}{0pt}
 \end{tabular}
 \vspace{1mm}
 \end{table}
 
-This comparison shows a clear and useful tradeoff. O3 remains the
-stronger baseline when absolute disparity precision is the priority,
-especially on the most difficult scenes. O4, however, now narrows the
-gap on both MAE and RMSE while still producing denser and smoother
-maps, and it further improves the fraction of pixels that fall within a
-1-pixel error tolerance. In other words, O4 clearly demonstrates the
-promise of learned descriptors, but the current compact Transformer
-still needs better scene generalization to consistently surpass the
-classical hybrid baseline.
+This extended comparison shows a more nuanced tradeoff. If only the
+reported error on predicted pixels is considered, the additional
+pretrained DINOv2 test is clearly the strongest result: it delivers the
+lowest mean MAE, RMSE, and Bad-1px, and it wins most scenes under all
+three metrics. This suggests that strong pretrained descriptors are very
+helpful in the current low-data regime. However, its mean valid ratio is
+only 0.2035, far below O4's 0.8612 and O3's 0.5316, so those gains are
+achieved on a much smaller subset of pixels. O4 therefore remains the
+densest learned result, while O3 remains the stronger higher-coverage
+baseline when absolute disparity precision is prioritized. At the same
+time, O3 still shows visible holes in low-confidence regions, so its
+numerical advantage should also be read with some caution: if those
+missing areas were penalized as prediction failures, the effective error
+would increase further. Overall, the DINOv2 test confirms the promise
+of pretrained learned descriptors, but the current compact Transformer
+still needs more training data and stronger local detail recovery, for
+example CNN or U-Net style refinement, to combine that accuracy with
+dense predictions.
 
 \subsection{7. Conclusion}\label{conclusion}
 
@@ -840,10 +852,20 @@ Instead, each stage builds technically on the previous one: O1 provides
 controlled image synthesis, O2 validates local feature robustness, O3
 converts feature evidence into dense geometry, and O4 tests whether
 trainable token descriptors can outperform hand-crafted features. At the
-current stage, O3 still wins on average MAE and RMSE, while O4 offers
-denser predictions, slightly better Bad-1px performance, and a smaller
-remaining gap in absolute error than before. This gives a clear roadmap
-for future work: preserve O4's density advantage while improving
+current stage, the additional pretrained DINOv2 test achieves the best
+reported MAE, RMSE, and Bad-1px, which shows that strong pretraining is
+already valuable under the current small-data setting. However, that
+accuracy comes with a very low valid ratio, so it is not yet the best
+overall solution when dense prediction quality is also required. O3
+still provides a stronger higher-coverage handcrafted baseline, O4
+provides the densest learned output, and O3 still leaves holes in some
+difficult regions, which means its reported error remains somewhat
+optimistic if those missing pixels are not explicitly counted. This
+gives a clear roadmap for future work: preserve O4's density advantage,
+reuse stronger pretraining such as DINOv2, enlarge the training set
+beyond the current expanded data, and add stronger detail-recovery
+modules such as CNN or U-Net style refinement so that boundaries and
+thin structures can be resolved more accurately while improving
 robustness on repeated-pattern and hard-ambiguity scenes.
 
 \clearpage
